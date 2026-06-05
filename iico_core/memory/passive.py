@@ -130,9 +130,11 @@ class PassiveMemory:
         return []
 
     def _search_by_tags(self, query: str, max_results: int) -> list[PassiveNote]:
-        # Tokenizar el query: palabras de ≥3 letras, en minúsculas
+        # Normalizar: quitar tildes y caracteres especiales para la comparación
+        normalized = self._normalize(query)
+        # Tokenizar: palabras de ≥2 letras, en minúsculas
         query_words = set(
-            w.lower() for w in re.findall(r"\b\w{3,}\b", query)
+            w for w in re.findall(r"\b\w{2,}\b", normalized)
         )
         if not query_words:
             # Sin palabras útiles: devolver las notas de mayor prioridad
@@ -140,7 +142,8 @@ class PassiveMemory:
 
         scored: list[tuple[int, int, PassiveNote]] = []
         for note in self._notes.values():
-            tag_set = set(note.tags)
+            # También normalizar los tags para comparación justa
+            tag_set = set(self._normalize(t) for t in note.tags)
             matches = len(query_words & tag_set)
             if matches > 0:
                 scored.append((matches, note.priority, note))
@@ -148,6 +151,13 @@ class PassiveMemory:
         # Ordenar: más coincidencias primero, luego por prioridad
         scored.sort(key=lambda x: (-x[0], -x[1]))
         return [item[2] for item in scored[:max_results]]
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Quita tildes y normaliza texto para comparación de tags."""
+        import unicodedata
+        nfkd = unicodedata.normalize("NFKD", text.lower())
+        return "".join(c for c in nfkd if not unicodedata.combining(c))
 
     # ------------------------------------------------------------------
     # Presupuesto de tokens
