@@ -3,6 +3,8 @@ iico_core/types.py
 ==================
 Dataclasses y tipos compartidos que definen el contrato entre el núcleo (Harness)
 y cualquier interfaz de usuario (TUI, Open WebUI, etc.).
+
+Fase 2: se agregan SkillDefinition y ToolResult para el sistema de skills.
 """
 
 from __future__ import annotations
@@ -60,8 +62,20 @@ class HarnessConfig:
     # Flags de características (para experimentos A/B)
     use_passive_memory: bool = True
     use_splay_tree: bool = True
-    use_embedding_search: bool = False   # Requiere ONNX, desactivado en Fase 1
+    use_embedding_search: bool = False   # Requiere ONNX, desactivado hasta instalar [embeddings]
     use_react_loop: bool = False         # Se activa en Fase 3
+    use_skills: bool = False             # Activa SkillRegistry + ShellBridge
+
+    # --- Splay Tree (Nivel 2) ---
+    splay_cache_size: int = 50           # Máximo de nodos en el Splay Tree
+    splay_peek_top: int = 5              # Nodos a consultar sin splayear (hit check rápido)
+
+    # --- EmbeddingIndex (Nivel 1) ---
+    embedding_threshold: float = 0.75   # Umbral mínimo de similitud del coseno
+    max_context_notes: int = 5          # Máximo de notas a inyectar en el prompt
+
+    # --- Skills ---
+    skill_timeout: float = 30.0         # Timeout en segundos para ejecución de skills
 
     # System prompt base
     system_prompt_base: str = (
@@ -108,3 +122,59 @@ class ToolCall:
     result: Any = None
     success: bool = True
     error: str | None = None
+
+
+# ---------------------------------------------------------------------------
+# Skills (Fase 2)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SkillDefinition:
+    """
+    Definición de una skill cargada desde disco.
+    Cada skill vive en skills/<nombre>/ con un meta.md y un run.py.
+    """
+    name: str                          # Identificador único, ej: "calculator"
+    description: str                   # Lo que el LLM ve en el system prompt
+    input_schema: dict[str, Any]       # JSON Schema de los argumentos de entrada
+    output_schema: dict[str, Any]      # JSON Schema de la salida
+    executable_path: Path              # Ruta al script/binario a ejecutar
+    runtime: str = "python"           # "python" | "shell" | "native"
+    tags: list[str] = field(default_factory=list)  # Tags para búsqueda semántica
+
+    def to_tool_dict(self) -> dict[str, Any]:
+        """Genera el descriptor de herramienta en formato compatible con LLMs (OpenAI/Ollama)."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            },
+        }
+
+
+@dataclass
+class ToolResult:
+    """
+    Resultado de la ejecución de una skill por parte del ShellBridge.
+    """
+    skill_name: str
+    output: str                        # stdout del proceso
+    exit_code: int = 0
+    error: str = ""                   # stderr del proceso
+    duration_ms: float = 0.0
+
+    @property
+    def success(self) -> bool:
+        return self.exit_code == 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "skill": self.skill_name,
+            "output": self.output,
+            "exit_code": self.exit_code,
+            "error": self.error,
+            "duration_ms": self.duration_ms,
+            "success": self.success,
+        }

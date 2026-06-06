@@ -9,5 +9,14 @@ iico_core.egg-info/SOURCES.txt
 iico_core.egg-info/dependency_links.txt
 iico_core.egg-info/requires.txt
 iico_core.egg-info/top_level.txt
+iico_core/bridge/__init__.py
+iico_core/bridge/shell.py
+iico_core/index/__init__.py
+iico_core/index/embedding.py
+iico_core/index/splay_tree.py
 iico_core/memory/__init__.py
+iico_core/memory/active.py
 iico_core/memory/passive.py
+tests/test_shell_bridge.py
+tests/test_skill_registry.py
+tests/test_splay_tree.py

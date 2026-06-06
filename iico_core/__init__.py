@@ -7,15 +7,29 @@ from .types import (
     HarnessEvent,
     HarnessEventType,
     ProviderConfig,
+    SkillDefinition,
+    ToolResult,
 )
 from .llm_client import create_client
+from .memory.active import SkillRegistry
+from .bridge.shell import ShellBridge
+from .index.splay_tree import SplayTree, SplayCacheMetrics
 
 __all__ = [
+    # Core
     "Harness",
+    "create_client",
+    # Types
     "ChatMessage",
     "HarnessConfig",
     "HarnessEvent",
     "HarnessEventType",
     "ProviderConfig",
-    "create_client",
+    "SkillDefinition",
+    "ToolResult",
+    # Fase 2
+    "SkillRegistry",
+    "ShellBridge",
+    "SplayTree",
+    "SplayCacheMetrics",
 ]
