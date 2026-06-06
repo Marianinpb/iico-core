@@ -62,7 +62,7 @@ class HarnessConfig:
     # Flags de características (para experimentos A/B)
     use_passive_memory: bool = True
     use_splay_tree: bool = True
-    use_embedding_search: bool = False   # Requiere ONNX, desactivado hasta instalar [embeddings]
+    use_embedding_search: bool = False   # Requiere iico-core[embeddings] instalado
     use_react_loop: bool = False         # Se activa en Fase 3
     use_skills: bool = False             # Activa SkillRegistry + ShellBridge
 
@@ -71,7 +71,7 @@ class HarnessConfig:
     splay_peek_top: int = 5              # Nodos a consultar sin splayear (hit check rápido)
 
     # --- EmbeddingIndex (Nivel 1) ---
-    embedding_threshold: float = 0.75   # Umbral mínimo de similitud del coseno
+    embedding_threshold: float = 0.50   # Umbral mínimo de similitud del coseno (MiniLM en español: 0.4-0.65)
     max_context_notes: int = 5          # Máximo de notas a inyectar en el prompt
 
     # --- Skills ---

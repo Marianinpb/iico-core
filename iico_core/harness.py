@@ -173,17 +173,22 @@ class Harness:
 
         # --- Paso 1: Consultar Splay Tree (Nivel 2) ---
         relevant_notes = []
-        splay_hits = self._splay.peek_keys_top(n=self.config.splay_peek_top)
-        cached_notes = [
-            self._splay.search(key).value
-            for key in splay_hits
-            if self._splay.search(key) is not None
-        ]
+        # peek_top retorna nodos sin modificar el árbol
+        top_nodes = self._splay.peek_top(n=self.config.splay_peek_top)
+        # Extraer los valores directamente de los nodos (sin llamar search() que splayea)
+        cached_notes = [node.value for node in top_nodes]
 
         if cached_notes and self._splay_is_relevant(cached_notes, query):
             # Hit: el Splay resuelve sin vectorizar
+            # Ahora sí llamamos search() para registrar el hit y splayear el nodo correcto
+            best_key = top_nodes[0].key
+            self._splay.search(best_key)  # registra hit en métricas
             relevant_notes = cached_notes
         else:
+            # Miss: registrar en métricas
+            if top_nodes:
+                self._splay_metrics.record_access(depth=len(top_nodes), hit=False)
+
             # --- Paso 2: Fallback al Nivel 1 ---
             if self._embedding_index is not None and self.config.use_embedding_search:
                 # Búsqueda semántica por embeddings
