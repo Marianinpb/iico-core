@@ -5,8 +5,8 @@
 ## 🚀 Características Principales
 
 - **Independencia de Interfaz**: El núcleo funciona con cualquier UI (Textual, Open WebUI, scripts, etc.), ya que expone métodos genéricos asíncronos y eventos estructurados (`HarnessEvent`).
-- **Memoria Pasiva**: Carga automática de notas Markdown + YAML al contexto del LLM, permitiendo búsquedas semánticas eficientes sin saturar la VRAM de la GPU.
-- **Eficiencia de Recursos**: Filtra rigurosamente qué contexto inyectar en el prompt mediante presupuestos de tokens, utilizando implementaciones optimizadas como *Splay Trees*.
+- **Memoria Pasiva Dual**: Carga automática de notas Markdown + YAML al contexto del LLM. Combina una *Caché Splay Tree* (Nivel 2) de altísima velocidad y una búsqueda local por *Embeddings Semánticos* (Nivel 1, usando ONNX) para inyectar contexto preciso sin depender de la nube y sin saturar la VRAM de la GPU.
+- **Registro de Skills**: Soporte nativo para herramientas externas. Las *Skills* se registran dinámicamente desde el disco y el `ShellBridge` levanta subprocesos seguros listos para que el agente los invoque (preparación para el bucle ReAct).
 - **Múltiples Proveedores**: Compatible de fábrica con Ollama y cualquier servicio compatible con la API de OpenAI (llama.cpp, LM Studio, vLLM) gracias a una interfaz de cliente de LLM unificada.
 
 ## 🏗️ Arquitectura del Arnés (Harness)
@@ -15,8 +15,10 @@ La arquitectura principal de la librería está dividida en submódulos especial
 
 - **`iico_core.harness`**: Contiene la clase orquestadora principal `Harness`, encargada de ensamblar dinámicamente el *System Prompt* y coordinar el ciclo de razonamiento (ReAct) con los eventos de salida.
 - **`iico_core.llm_client`**: Interfaces unificadas tras un *Protocol* que oculta las particularidades de si nos conectamos por Ollama local o a través de una API de OpenAI remota.
-- **`iico_core.memory`**: Módulos responsables de la memoria del agente. Destaca `passive.py`, que se encarga del manejo determinista de las notas de contexto (archivos Markdown con frontmatter en YAML).
-- **`iico_core.types`**: Dataclasses unificadas (como `ChatMessage`, `HarnessConfig`, `HarnessEvent`) que actúan como la "API pública" consumible por el Frontend.
+- **`iico_core.memory`**: Módulos responsables de la memoria del agente. `passive.py` carga la base de conocimiento local (Markdown+YAML), mientras que `active.py` (`SkillRegistry`) cataloga las herramientas disponibles.
+- **`iico_core.index`**: Algoritmos de indexación. Destacan `embedding.py` (motor semántico de Nivel 1) y `splay_tree.py` (Caché O(1) de Nivel 2 basada en auto-balances).
+- **`iico_core.bridge`**: Puente seguro (`ShellBridge`) para ejecutar comandos del sistema que el agente decide utilizar.
+- **`iico_core.types`**: Dataclasses unificadas (como `ChatMessage`, `HarnessConfig`, `HarnessEvent`) que actúan como la "API pública".
 
 ## 📦 Instalación
 
