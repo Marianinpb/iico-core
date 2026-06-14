@@ -13,7 +13,7 @@ from typing import AsyncGenerator, Protocol, runtime_checkable
 
 import httpx
 
-from .types import ChatMessage
+from .types import ChatMessage, LLMResponse, LLMToolCall
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,15 @@ class LLMClient(Protocol):
         system_prompt: str,
     ) -> AsyncGenerator[str, None]:
         """Devuelve fragmentos de texto generados por el LLM (streaming)."""
+        ...
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        system_prompt: str,
+        tools: list[dict],
+    ) -> LLMResponse:
+        """Envía mensajes con herramientas disponibles y devuelve la respuesta completa."""
         ...
 
     async def fetch_models(self) -> list[str]:
@@ -91,6 +100,59 @@ class OllamaClient:
                 yield f"\n[Sistema: Error HTTP {e.response.status_code} desde {self._chat_url}]"
             except Exception as e:
                 yield f"\n[Sistema: Error inesperado con Ollama: {e}]"
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        system_prompt: str,
+        tools: list[dict],
+    ) -> LLMResponse:
+        """Llama a Ollama con tool calling nativo (soportado desde v0.1.24)."""
+        payload_messages = [{"role": "system", "content": system_prompt}]
+        payload_messages += [m.to_dict() for m in messages]
+
+        payload: dict = {
+            "model": self.model,
+            "messages": payload_messages,
+            "stream": False,
+            "options": {"temperature": self.temperature},
+        }
+        if tools:
+            payload["tools"] = tools
+
+        timeout = httpx.Timeout(120.0, connect=5.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(self._chat_url, json=payload)
+                r.raise_for_status()
+                data = r.json()
+
+            message = data.get("message", {})
+            content = message.get("content") or ""
+            finish_reason = "stop"
+            tool_calls: list[LLMToolCall] = []
+
+            raw_tools = message.get("tool_calls", [])
+            if raw_tools:
+                finish_reason = "tool_calls"
+                for i, tc in enumerate(raw_tools):
+                    fn = tc.get("function", {})
+                    tool_calls.append(LLMToolCall(
+                        call_id=str(i),
+                        name=fn.get("name", ""),
+                        args=fn.get("arguments") or {},
+                    ))
+
+            return LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            return LLMResponse(
+                content=f"[Error en tool calling: {e}]",
+                finish_reason="error",
+            )
 
     async def fetch_models(self) -> list[str]:
         try:
@@ -159,6 +221,70 @@ class OpenAIClient:
                 yield f"\n[Sistema: Error HTTP {e.response.status_code} desde {self._chat_url}]"
             except Exception as e:
                 yield f"\n[Sistema: Error inesperado: {e}]"
+
+    async def chat_with_tools(
+        self,
+        messages: list[ChatMessage],
+        system_prompt: str,
+        tools: list[dict],
+    ) -> LLMResponse:
+        """Llama a la API OpenAI-compatible con tool calling nativo."""
+        payload_messages = [{"role": "system", "content": system_prompt}]
+        payload_messages += [m.to_dict() for m in messages]
+
+        payload: dict = {
+            "model": self.model,
+            "messages": payload_messages,
+            "stream": False,
+            "temperature": self.temperature,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        timeout = httpx.Timeout(120.0, connect=5.0)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(self._chat_url, json=payload)
+                r.raise_for_status()
+                data = r.json()
+
+            choices = data.get("choices", [])
+            if not choices:
+                return LLMResponse(content="", finish_reason="error")
+
+            choice = choices[0]
+            msg = choice.get("message", {})
+            content = msg.get("content") or ""
+            finish_reason = choice.get("finish_reason", "stop")
+            tool_calls: list[LLMToolCall] = []
+
+            raw_tools = msg.get("tool_calls") or []
+            if raw_tools:
+                for tc in raw_tools:
+                    fn = tc.get("function", {})
+                    raw_args = fn.get("arguments", "{}")
+                    if isinstance(raw_args, str):
+                        try:
+                            raw_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            raw_args = {}
+                    tool_calls.append(LLMToolCall(
+                        call_id=tc.get("id", ""),
+                        name=fn.get("name", ""),
+                        args=raw_args,
+                    ))
+
+            return LLMResponse(
+                content=content,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
+        except Exception as e:
+            return LLMResponse(
+                content=f"[Error en tool calling: {e}]",
+                finish_reason="error",
+            )
 
     async def fetch_models(self) -> list[str]:
         try:

@@ -2,12 +2,19 @@
 
 from .harness import Harness
 from .types import (
+    AgentState,
     ChatMessage,
     HarnessConfig,
     HarnessEvent,
     HarnessEventType,
+    LLMResponse,
+    LLMToolCall,
     ProviderConfig,
+    SDDDocument,
     SkillDefinition,
+    TaskGoal,
+    TaskStatus,
+    TaskTemplate,
     ToolResult,
 )
 from .llm_client import create_client
@@ -19,7 +26,7 @@ __all__ = [
     # Core
     "Harness",
     "create_client",
-    # Types
+    # Types Fase 1-2
     "ChatMessage",
     "HarnessConfig",
     "HarnessEvent",
@@ -27,7 +34,15 @@ __all__ = [
     "ProviderConfig",
     "SkillDefinition",
     "ToolResult",
-    # Fase 2
+    # Types Fase 3
+    "AgentState",
+    "LLMResponse",
+    "LLMToolCall",
+    "SDDDocument",
+    "TaskGoal",
+    "TaskStatus",
+    "TaskTemplate",
+    # Subsistemas
     "SkillRegistry",
     "ShellBridge",
     "SplayTree",

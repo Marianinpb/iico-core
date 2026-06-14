@@ -5,6 +5,8 @@ Dataclasses y tipos compartidos que definen el contrato entre el núcleo (Harnes
 y cualquier interfaz de usuario (TUI, Open WebUI, etc.).
 
 Fase 2: se agregan SkillDefinition y ToolResult para el sistema de skills.
+Fase 3: se agregan AgentState, TaskTemplate, SDDDocument y LLMResponse para
+el flujo SDD y el bucle ReAct.
 """
 
 from __future__ import annotations
@@ -93,14 +95,23 @@ class HarnessConfig:
 # ---------------------------------------------------------------------------
 
 class HarnessEventType(Enum):
-    TOKEN         = "token"           # Fragmento de texto generado por el LLM
-    DONE          = "done"            # Respuesta completa
-    ERROR         = "error"           # Error recuperable
-    SYSTEM        = "system"          # Mensaje de sistema (ej: "Modelo cambiado a X")
-    THINKING      = "thinking"        # El agente está razonando (Fase 3)
-    SKILL_START   = "skill_start"     # Inicio de ejecución de una skill
-    SKILL_DONE    = "skill_done"      # Fin de ejecución de una skill
-    PLAN_UPDATE   = "plan_update"     # Actualización del plan de tareas
+    TOKEN              = "token"           # Fragmento de texto generado por el LLM
+    DONE               = "done"            # Respuesta completa
+    ERROR              = "error"           # Error recuperable
+    SYSTEM             = "system"          # Mensaje de sistema
+    THINKING           = "thinking"        # El agente está razonando
+    SKILL_START        = "skill_start"     # Inicio de ejecución de una skill
+    SKILL_DONE         = "skill_done"      # Fin de ejecución de una skill
+    PLAN_UPDATE        = "plan_update"     # Actualización del plan de tareas
+    # --- Fase 3: SDD y ReAct ---
+    SDD_STARTED        = "sdd_started"     # Se inició un flujo SDD
+    SDD_QUESTION       = "sdd_question"    # El agente pregunta algo al usuario
+    PLAN_PROPOSED      = "plan_proposed"   # Plan listo para aprobación
+    TASK_STARTED       = "task_started"    # Inicio de ejecución de una task
+    TASK_COMPLETED     = "task_completed"  # Task completada
+    TASK_FAILED        = "task_failed"     # Task falló
+    GOAL_VERIFIED      = "goal_verified"   # Meta comprobada
+    STATE_CHANGED      = "state_changed"   # Cambio de estado del agente
 
 
 @dataclass
@@ -108,6 +119,85 @@ class HarnessEvent:
     """Evento emitido por el Harness hacia el UI."""
     type: HarnessEventType
     payload: Any = None               # str para TOKEN/ERROR/SYSTEM, dict para PLAN_UPDATE, etc.
+
+
+# ---------------------------------------------------------------------------
+# Fase 3: Estado del Agente (Máquina de Estados)
+# ---------------------------------------------------------------------------
+
+class AgentState(Enum):
+    """Estado actual del agente en el flujo SDD."""
+    IDLE              = "idle"              # Esperando input del usuario
+    INTERVIEWING      = "interviewing"      # Recopilando requisitos para el SDD
+    PLANNING          = "planning"          # Generando plan de acción
+    AWAITING_APPROVAL = "awaiting_approval" # Plan presentado, esperando aprobación
+    EXECUTING         = "executing"         # Ejecutando tasks vía ReAct
+    VERIFYING         = "verifying"         # Verificando metas de una task
+
+
+class TaskStatus(Enum):
+    """Estado de una tarea dentro del plan."""
+    PENDING     = "pending"
+    BLOCKED     = "blocked"      # Dependencias no satisfechas
+    IN_PROGRESS = "in_progress"
+    COMPLETED   = "completed"
+    FAILED      = "failed"
+
+
+@dataclass
+class TaskGoal:
+    """Meta comprobable de una tarea."""
+    description: str
+    verification_skill: str | None = None  # Nombre de la skill para verificar
+    verification_args: dict = field(default_factory=dict)
+    met: bool = False
+
+
+@dataclass
+class TaskTemplate:
+    """Plantilla de tarea generada por el TaskManager."""
+    id: str                              # ej: "task_1"
+    description: str
+    goals: list[TaskGoal] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)  # IDs de tareas prerequisito
+    status: TaskStatus = TaskStatus.PENDING
+    tags: list[str] = field(default_factory=list)  # Para búsqueda por tags
+    result_summary: str = ""             # Resumen del resultado al completar
+
+    def is_ready(self, completed_ids: set[str]) -> bool:
+        """¿Están todas las dependencias satisfechas?"""
+        return all(dep in completed_ids for dep in self.depends_on)
+
+
+@dataclass
+class SDDDocument:
+    """Documento de Especificación (Spec-Driven Development)."""
+    title: str
+    description: str
+    requirements: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    raw_markdown: str = ""              # El SDD completo como nota consultable
+    tags: list[str] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Fase 3: Respuesta del LLM con Tool Calls
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LLMToolCall:
+    """Tool call emitido por el LLM (formato nativo Ollama/OpenAI)."""
+    call_id: str                         # ID único de la llamada
+    name: str                            # Nombre de la skill
+    args: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class LLMResponse:
+    """Respuesta completa del LLM (no streaming, para el ReAct loop)."""
+    content: str                         # Texto de la respuesta
+    tool_calls: list[LLMToolCall] = field(default_factory=list)
+    finish_reason: str = "stop"          # "stop" | "tool_calls"
 
 
 # ---------------------------------------------------------------------------

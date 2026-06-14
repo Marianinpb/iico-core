@@ -6,16 +6,16 @@ Orquestador central del sistema iico-agent.
 El Harness es el único punto de contacto entre el UI y todo el núcleo.
 El UI solo llama a `process_input()` y consume los `HarnessEvent` que devuelve.
 
-Fase 2: implementa la arquitectura de memoria dual (Característica 3):
-    Nivel 1: EmbeddingIndex  — búsqueda semántica (fuente de verdad)
-    Nivel 2: SplayTree       — caché de trabajo rápida (localidad temporal)
+Fase 2: implementa la arquitectura de memoria dual (Característica 3).
+Fase 3: el Harness se convierte en una máquina de estados que orquesta el
+flujo SDD completo: Definición → Planificación Autorizada → Ejecución Estricta.
 
-Flujo de build_system_prompt():
-    1. Consultar raíz/hijos del Splay (Nivel 2) → hit? → usar sin vectorizar
-    2. Miss → EmbeddingIndex.search() (Nivel 1)
-    3. Insertar resultados del Nivel 1 en el Splay
-    4. Aplicar token budget
-    5. Inyectar notas + firmas de skills al system prompt
+Flujo de estados:
+    IDLE → INTERVIEWING (detección SDD)
+    INTERVIEWING → PLANNING (entrevista completa)
+    PLANNING → AWAITING_APPROVAL (plan generado)
+    AWAITING_APPROVAL → EXECUTING (usuario aprueba)
+    EXECUTING → VERIFYING → IDLE (tareas terminadas)
 """
 
 from __future__ import annotations
@@ -30,11 +30,13 @@ from .llm_client import LLMClient, create_client
 from .memory.active import SkillRegistry
 from .memory.passive import PassiveMemory
 from .types import (
+    AgentState,
     ChatMessage,
     HarnessConfig,
     HarnessEvent,
     HarnessEventType,
     ProviderConfig,
+    SDDDocument,
     SkillDefinition,
     ToolResult,
 )
@@ -44,13 +46,8 @@ class Harness:
     """
     Orquestador principal del iico-agent.
 
-    Responsabilidades en Fase 2:
-    - Gestionar el historial de mensajes
-    - Construir el system prompt dinámico con arquitectura de dos niveles
-    - Gestionar el Splay Tree como caché de contexto
-    - Llamar al LLM y emitir HarnessEvents
-    - Mantener el SkillRegistry y ShellBridge disponibles
-    - Manejar comandos slash (/)
+    Fase 2: Gestiona memoria dual, Skills y ShellBridge.
+    Fase 3: Máquina de estados que orquesta el flujo SDD completo.
     """
 
     def __init__(self, config: HarnessConfig):
@@ -89,6 +86,25 @@ class Harness:
             self._skill_registry = SkillRegistry(config.skills_path)
             self._bridge = ShellBridge(default_timeout=config.skill_timeout)
 
+        # --- Fase 3: Máquina de Estados SDD ---
+        self._state: AgentState = AgentState.IDLE
+        self._project_root: Path | None = None
+        self._sdd_manager = None
+        self._task_manager = None
+        self._react_loop = None
+
+        if config.use_react_loop:
+            self._init_reasoning_modules()
+
+    def _init_reasoning_modules(self) -> None:
+        """Inicializa los módulos de razonamiento de la Fase 3."""
+        from .reasoning.sdd_manager import SDDManager
+        from .reasoning.task_manager import TaskManager
+        from .reasoning.react_loop import ReActLoop
+        self._sdd_manager = SDDManager(self)
+        self._task_manager = TaskManager(self)
+        self._react_loop = ReActLoop(self)
+
     # ------------------------------------------------------------------
     # Inicialización del índice de embeddings
     # ------------------------------------------------------------------
@@ -117,21 +133,96 @@ class Harness:
     ) -> AsyncGenerator[HarnessEvent, None]:
         """
         Punto de entrada único para cualquier UI.
-        Emite HarnessEvents que el UI consume para renderizar.
+        En Fase 3 opera como una máquina de estados.
         """
         text = user_text.strip()
         if not text:
             return
 
-        # Manejar comandos slash
+        # Comandos slash (siempre tienen prioridad)
         if text.startswith("/"):
             async for event in self._handle_command(text):
                 yield event
             return
 
-        # Mensaje normal → LLM
-        self.history.append(ChatMessage(role="user", content=text))
+        # ─────────────────────────────────────────────────────────────
+        # Máquina de estados Fase 3
+        # ─────────────────────────────────────────────────────────────
 
+        if self._state == AgentState.INTERVIEWING and self._sdd_manager:
+            # El usuario está respondiendo preguntas de la entrevista SDD
+            async for event in self._sdd_manager.process_answer(text):
+                yield event
+
+            # Si la entrevista consolidó un SDD, generar el plan
+            if self._sdd_manager.current_sdd is not None:
+                self._state = AgentState.PLANNING
+                yield HarnessEvent(
+                    type=HarnessEventType.STATE_CHANGED,
+                    payload="📋 Generando plan de acción...",
+                )
+                async for event in self._generate_and_propose_plan(
+                    self._sdd_manager.current_sdd
+                ):
+                    yield event
+            return
+
+        if self._state == AgentState.AWAITING_APPROVAL and self._task_manager:
+            # El usuario está aprobando o modificando el plan
+            if self._task_manager.is_approval(text):
+                self._state = AgentState.EXECUTING
+                yield HarnessEvent(
+                    type=HarnessEventType.STATE_CHANGED,
+                    payload="⚙️ Ejecutando plan...",
+                )
+                async for event in self._execute_plan():
+                    yield event
+            else:
+                # El usuario quiere cambios: volver a generar el plan
+                self._state = AgentState.PLANNING
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="Entendido. Ajustando el plan con tus observaciones...",
+                )
+                # Tratar el texto como feedback e intentar re-planificar
+                # Por ahora: respuesta simple y volver a proponer
+                self.history.append(ChatMessage(role="user", content=text))
+                async for event in self._generate_and_propose_plan(
+                    self._sdd_manager.current_sdd if self._sdd_manager else None
+                ):
+                    yield event
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Detección de intención SDD (estado IDLE)
+        # ─────────────────────────────────────────────────────────────
+
+        if (
+            self.config.use_react_loop
+            and self._sdd_manager
+            and self._sdd_manager.should_trigger(text)
+        ):
+            self._state = AgentState.INTERVIEWING
+            self.history.append(ChatMessage(role="user", content=text))
+            async for event in self._sdd_manager.start_interview(text):
+                yield event
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # ReAct directo (Fase 3, sin plan SDD)
+        # ─────────────────────────────────────────────────────────────
+
+        if self.config.use_react_loop and self._react_loop:
+            self.history.append(ChatMessage(role="user", content=text))
+            async for event in self._react_loop.execute_simple(text):
+                yield event
+            return
+
+        # ─────────────────────────────────────────────────────────────
+        # Fallback: chat normal (Fase 2)
+        # ─────────────────────────────────────────────────────────────
+
+        self.history.append(ChatMessage(role="user", content=text))
         system_prompt = self.build_system_prompt(query=text)
 
         full_response = ""
@@ -141,7 +232,7 @@ class Harness:
                 yield HarnessEvent(type=HarnessEventType.TOKEN, payload=token)
         except Exception as e:
             yield HarnessEvent(type=HarnessEventType.ERROR, payload=str(e))
-            self.history.pop()   # Revertir el mensaje si falló
+            self.history.pop()
             return
 
         self.history.append(ChatMessage(role="assistant", content=full_response))
@@ -288,6 +379,112 @@ class Harness:
         )
 
     # ------------------------------------------------------------------
+    # Flujo SDD: generación de plan y ejecución (Fase 3)
+    # ------------------------------------------------------------------
+
+    async def _generate_and_propose_plan(
+        self, sdd: SDDDocument | None
+    ) -> AsyncGenerator[HarnessEvent, None]:
+        """Genera un plan desde el SDD y lo presenta al usuario para aprobación."""
+        if sdd is None or self._task_manager is None:
+            yield HarnessEvent(
+                type=HarnessEventType.ERROR,
+                payload="No hay SDD activo para generar un plan.",
+            )
+            return
+
+        tasks, errors = await self._task_manager.generate_plan_from_sdd(sdd)
+
+        if errors:
+            error_text = "\n".join(errors)
+            yield HarnessEvent(
+                type=HarnessEventType.ERROR,
+                payload=f"Error en el plan generado:\n{error_text}",
+            )
+            self._state = AgentState.IDLE
+            return
+
+        # Persistir las tareas como notas en el proyecto
+        if self._project_root:
+            self._task_manager.set_project_root(self._project_root)
+            self._task_manager.save_tasks_as_notes()
+
+        # Presentar el plan al usuario
+        plan_text = self._task_manager.format_plan_for_display()
+        self._state = AgentState.AWAITING_APPROVAL
+
+        yield HarnessEvent(
+            type=HarnessEventType.PLAN_PROPOSED,
+            payload={
+                "tasks": [
+                    {
+                        "id": t.id,
+                        "description": t.description,
+                        "depends_on": t.depends_on,
+                        "goals": [g.description for g in t.goals],
+                    }
+                    for t in tasks
+                ]
+            },
+        )
+        yield HarnessEvent(type=HarnessEventType.TOKEN, payload=plan_text)
+        yield HarnessEvent(type=HarnessEventType.DONE, payload=plan_text)
+
+    async def _execute_plan(self) -> AsyncGenerator[HarnessEvent, None]:
+        """Ejecuta las tareas del plan una a una, validando dependencias."""
+        if self._task_manager is None or self._react_loop is None:
+            yield HarnessEvent(
+                type=HarnessEventType.ERROR,
+                payload="No hay plan activo para ejecutar.",
+            )
+            return
+
+        sdd_tags = []
+        if self._sdd_manager and self._sdd_manager.current_sdd:
+            sdd_tags = self._sdd_manager.current_sdd.tags
+
+        while True:
+            task = self._task_manager.get_next_task()
+            if task is None:
+                break
+
+            progress = self._task_manager.get_progress()
+            yield HarnessEvent(
+                type=HarnessEventType.STATE_CHANGED,
+                payload=(
+                    f"⚙️ Ejecutando {task.id} "
+                    f"({progress['completed']+1}/{progress['total']}): "
+                    f"{task.description}"
+                ),
+            )
+
+            self._state = AgentState.EXECUTING
+            async for event in self._react_loop.execute_task(task, sdd_tags):
+                yield event
+
+            if task.status.value == "failed":
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload=(
+                        f"⚠️ La tarea '{task.id}' falló. El plan se ha detenido.\n"
+                        f"Puedes usar /abort para cancelar o revisar el error."
+                    ),
+                )
+                self._state = AgentState.IDLE
+                return
+
+        # Todas las tareas completadas
+        progress = self._task_manager.get_progress()
+        summary = (
+            f"✅ Plan completado: {progress['completed']}/{progress['total']} tareas.\n"
+            "El agente ha terminado la ejecución."
+        )
+        yield HarnessEvent(type=HarnessEventType.STATE_CHANGED, payload=summary)
+        yield HarnessEvent(type=HarnessEventType.TOKEN, payload=summary)
+        yield HarnessEvent(type=HarnessEventType.DONE, payload=summary)
+        self._state = AgentState.IDLE
+
+    # ------------------------------------------------------------------
     # Comandos slash
     # ------------------------------------------------------------------
 
@@ -355,12 +552,112 @@ class Harness:
             )
             yield HarnessEvent(type=HarnessEventType.SYSTEM, payload=msg)
 
+        elif cmd == "/sdd":
+            if not self.config.use_react_loop:
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="El flujo SDD requiere use_react_loop=True en la configuración.",
+                )
+            elif arg:
+                # Iniciar SDD manualmente con descripción
+                self._state = AgentState.INTERVIEWING
+                async for event in self._sdd_manager.start_interview(arg):
+                    yield event
+            else:
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="Uso: /sdd <descripción del proyecto>\nO simplemente describe tu proyecto en lenguaje natural.",
+                )
+
+        elif cmd == "/plan":
+            if self._task_manager and self._task_manager.tasks:
+                plan_text = self._task_manager.format_plan_for_display()
+                progress = self._task_manager.get_progress()
+                status_line = (
+                    f"Progreso: {progress['completed']}/{progress['total']} completadas | "
+                    f"{progress['in_progress']} en progreso | "
+                    f"{progress['failed']} fallidas\n\n"
+                )
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload=status_line + plan_text,
+                )
+            else:
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="No hay ningún plan activo. Usa /sdd <proyecto> para iniciar uno.",
+                )
+
+        elif cmd == "/tasks":
+            if self._task_manager and self._task_manager.tasks:
+                lines = ["Estado de tareas:\n"]
+                status_icons = {
+                    "pending": "⏳",
+                    "blocked": "🔒",
+                    "in_progress": "⚙️",
+                    "completed": "✅",
+                    "failed": "❌",
+                }
+                for tid in self._task_manager.execution_order:
+                    t = self._task_manager.tasks[tid]
+                    icon = status_icons.get(t.status.value, "")
+                    lines.append(f"{icon} [{t.id}] {t.description}")
+                    if t.result_summary:
+                        lines.append(f"   └ {t.result_summary[:80]}")
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="\n".join(lines),
+                )
+            else:
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="No hay tareas en el plan actual.",
+                )
+
+        elif cmd == "/project":
+            if arg:
+                project_path = Path(arg).expanduser().resolve()
+                if project_path.exists() and project_path.is_dir():
+                    self._project_root = project_path
+                    if self._sdd_manager:
+                        self._sdd_manager.set_project_root(project_path)
+                    if self._task_manager:
+                        self._task_manager.set_project_root(project_path)
+                    yield HarnessEvent(
+                        type=HarnessEventType.SYSTEM,
+                        payload=f"Carpeta raíz del proyecto: {project_path}",
+                    )
+                else:
+                    yield HarnessEvent(
+                        type=HarnessEventType.SYSTEM,
+                        payload=f"La ruta '{arg}' no existe o no es un directorio.",
+                    )
+            else:
+                current = str(self._project_root) if self._project_root else "(no configurada)"
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload=f"Carpeta raíz actual: {current}\nUso: /project <ruta>",
+                )
+
+        elif cmd == "/abort":
+            self._state = AgentState.IDLE
+            if self._task_manager:
+                self._task_manager._tasks.clear()
+                self._task_manager._execution_order.clear()
+            if self._sdd_manager:
+                self._sdd_manager._current_sdd = None
+            yield HarnessEvent(
+                type=HarnessEventType.SYSTEM,
+                payload="⚠️ Flujo SDD cancelado. El agente vuelve al modo conversacional.",
+            )
+
         else:
             yield HarnessEvent(
                 type=HarnessEventType.SYSTEM,
                 payload=(
                     f"Comando desconocido '{cmd}'.\n"
-                    "Comandos disponibles: /clear, /memory, /memory-reload, /skills, /splay"
+                    "Comandos disponibles: /clear, /memory, /memory-reload, /skills, "
+                    "/splay, /sdd, /plan, /tasks, /project, /abort"
                 ),
             )
 
