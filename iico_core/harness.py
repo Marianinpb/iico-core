@@ -96,6 +96,9 @@ class Harness:
                 project_root=self._project_root,
             )
 
+        # --- Aprobación de comandos (pausa hasta que el UI responda) ---
+        self._approval_future: "asyncio.Future[bool] | None" = None
+
         if config.use_react_loop:
             self._init_reasoning_modules()
 
@@ -107,6 +110,44 @@ class Harness:
         self._sdd_manager = SDDManager(self)
         self._task_manager = TaskManager(self)
         self._react_loop = ReActLoop(self)
+
+    # ------------------------------------------------------------------
+    # Aprobación de comandos de terminal (Fase 3)
+    # ------------------------------------------------------------------
+
+    def request_approval(self, command: str) -> None:
+        """
+        Prepara un Future de aprobación ANTES de yield COMMAND_APPROVAL_REQUIRED.
+        Debe llamarse ANTES de hacer yield en el generador, de modo que cuando
+        el generador se suspenda y el UI procese el evento, el Future ya exista
+        y `approve()` / `reject()` puedan resolverlo.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        self._approval_future = loop.create_future()
+
+    async def wait_for_approval(self) -> bool:
+        """
+        Espera a que el UI llame a approve() o reject().
+        El Future ya fue creado en request_approval(), por lo que
+        si el UI lo resolvió mientras el generador estaba suspendido
+        (entre yield y este await), regresa inmediatamente.
+        """
+        if self._approval_future is None:
+            return True
+        result = await self._approval_future
+        self._approval_future = None
+        return result
+
+    def approve(self) -> None:
+        """Llamado por el UI: el usuario aprobó el comando."""
+        if self._approval_future and not self._approval_future.done():
+            self._approval_future.set_result(True)
+
+    def reject(self) -> None:
+        """Llamado por el UI: el usuario rechazó el comando."""
+        if self._approval_future and not self._approval_future.done():
+            self._approval_future.set_result(False)
 
     # ------------------------------------------------------------------
     # Inicialización del índice de embeddings

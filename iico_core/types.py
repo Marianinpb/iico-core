@@ -78,6 +78,7 @@ class HarnessConfig:
 
     # --- Skills ---
     skill_timeout: float = 30.0         # Timeout en segundos para ejecución de skills
+    require_command_confirmation: bool = True   # Pedir confirmación antes de run_command
 
     # System prompt base
     system_prompt_base: str = (
@@ -112,6 +113,7 @@ class HarnessEventType(Enum):
     TASK_FAILED        = "task_failed"     # Task falló
     GOAL_VERIFIED      = "goal_verified"   # Meta comprobada
     STATE_CHANGED      = "state_changed"   # Cambio de estado del agente
+    COMMAND_APPROVAL_REQUIRED = "command_approval_required"  # Pedir al usuario si puede ejecutar un comando
 
 
 @dataclass

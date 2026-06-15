@@ -108,7 +108,35 @@ class ReActLoop:
             messages.append(ChatMessage(role="assistant", content=response.content or ""))
 
             for tc in response.tool_calls:
-                yield HarnessEvent(type=HarnessEventType.SKILL_START, payload=tc.name)
+                # Mostrar qué skill/comando se va a ejecutar (con detalle de args)
+                yield HarnessEvent(
+                    type=HarnessEventType.SKILL_START,
+                    payload={"name": tc.name, "args": tc.args},
+                )
+
+                # Pedir aprobación si es run_command y el flag está activo
+                if (
+                    tc.name == "run_command"
+                    and self.harness.config.require_command_confirmation
+                ):
+                    command_str = tc.args.get("command", "?")
+                    self.harness.request_approval(command_str)  # crea el Future
+                    yield HarnessEvent(
+                        type=HarnessEventType.COMMAND_APPROVAL_REQUIRED,
+                        payload=command_str,
+                    )
+                    approved = await self.harness.wait_for_approval()
+                    if not approved:
+                        messages.append(ChatMessage(
+                            role="tool",
+                            content=json.dumps({"error": "Comando cancelado por el usuario."}),
+                        ))
+                        yield HarnessEvent(
+                            type=HarnessEventType.SKILL_DONE,
+                            payload={"skill": tc.name, "success": False, "cancelled": True},
+                        )
+                        continue
+
                 ok, retry_count = await self._execute_tool_call_async(tc, messages, retry_count)
                 if not ok and retry_count >= self.MAX_RETRIES_PER_STEP:
                     yield HarnessEvent(
@@ -183,6 +211,35 @@ class ReActLoop:
 
             all_ok = True
             for tc in response.tool_calls:
+                # Mostrar qué skill/comando se va a ejecutar
+                yield HarnessEvent(
+                    type=HarnessEventType.SKILL_START,
+                    payload={"name": tc.name, "args": tc.args},
+                )
+
+                # Pedir aprobación si es run_command
+                if (
+                    tc.name == "run_command"
+                    and self.harness.config.require_command_confirmation
+                ):
+                    command_str = tc.args.get("command", "?")
+                    self.harness.request_approval(command_str)
+                    yield HarnessEvent(
+                        type=HarnessEventType.COMMAND_APPROVAL_REQUIRED,
+                        payload=command_str,
+                    )
+                    approved = await self.harness.wait_for_approval()
+                    if not approved:
+                        messages.append(ChatMessage(
+                            role="tool",
+                            content=json.dumps({"error": "Comando cancelado por el usuario."}),
+                        ))
+                        yield HarnessEvent(
+                            type=HarnessEventType.SKILL_DONE,
+                            payload={"skill": tc.name, "success": False, "cancelled": True},
+                        )
+                        continue
+
                 ok, retry_count = await self._execute_tool_call_async(
                     tc, messages, retry_count
                 )
