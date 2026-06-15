@@ -79,6 +79,13 @@ class Harness:
         if config.use_embedding_search:
             self._init_embedding_index()
 
+        # --- Fase 3: Máquina de Estados SDD ---
+        self._state: AgentState = AgentState.IDLE
+        self._project_root: Path | None = None
+        self._sdd_manager = None
+        self._task_manager = None
+        self._react_loop = None
+
         # --- Skills (Fase 2) ---
         self._skill_registry: SkillRegistry | None = None
         self._bridge: ShellBridge | None = None
@@ -88,13 +95,6 @@ class Harness:
                 default_timeout=config.skill_timeout,
                 project_root=self._project_root,
             )
-
-        # --- Fase 3: Máquina de Estados SDD ---
-        self._state: AgentState = AgentState.IDLE
-        self._project_root: Path | None = None
-        self._sdd_manager = None
-        self._task_manager = None
-        self._react_loop = None
 
         if config.use_react_loop:
             self._init_reasoning_modules()
