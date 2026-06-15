@@ -6,7 +6,7 @@
 
 - **Independencia de Interfaz**: El núcleo funciona con cualquier UI (Textual, Open WebUI, scripts, etc.), ya que expone métodos genéricos asíncronos y eventos estructurados (`HarnessEvent`).
 - **Memoria Pasiva Dual**: Carga automática de notas Markdown + YAML al contexto del LLM. Combina una *Caché Splay Tree* (Nivel 2) de altísima velocidad y una búsqueda local por *Embeddings Semánticos* (Nivel 1, usando ONNX) para inyectar contexto preciso sin depender de la nube y sin saturar la VRAM de la GPU.
-- **Registro de Skills**: Soporte nativo para herramientas externas. Las *Skills* se registran dinámicamente desde el disco y el `ShellBridge` levanta subprocesos seguros listos para que el agente los invoque (preparación para el bucle ReAct).
+- **Registro de Skills y Bucle Autónomo (ReAct)**: Soporte nativo para herramientas externas. El agente utiliza un paradigma *Spec-Driven Development* interno para formular planes estructurados, resolver topológicamente dependencias de las tareas y usar el `ShellBridge` para ejecutar comandos de forma autónoma.
 - **Múltiples Proveedores**: Compatible de fábrica con Ollama y cualquier servicio compatible con la API de OpenAI (llama.cpp, LM Studio, vLLM) gracias a una interfaz de cliente de LLM unificada.
 
 ## 🏗️ Arquitectura del Arnés (Harness)
