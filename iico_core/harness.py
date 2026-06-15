@@ -84,7 +84,10 @@ class Harness:
         self._bridge: ShellBridge | None = None
         if config.use_skills:
             self._skill_registry = SkillRegistry(config.skills_path)
-            self._bridge = ShellBridge(default_timeout=config.skill_timeout)
+            self._bridge = ShellBridge(
+                default_timeout=config.skill_timeout,
+                project_root=self._project_root,
+            )
 
         # --- Fase 3: Máquina de Estados SDD ---
         self._state: AgentState = AgentState.IDLE
@@ -462,6 +465,9 @@ class Harness:
             async for event in self._react_loop.execute_task(task, sdd_tags):
                 yield event
 
+            # Persist the task state change after execution
+            self._task_manager.save_tasks_as_notes()
+
             if task.status.value == "failed":
                 yield HarnessEvent(
                     type=HarnessEventType.SYSTEM,
@@ -623,6 +629,8 @@ class Harness:
                         self._sdd_manager.set_project_root(project_path)
                     if self._task_manager:
                         self._task_manager.set_project_root(project_path)
+                    if self._bridge:
+                        self._bridge.project_root = project_path
                     yield HarnessEvent(
                         type=HarnessEventType.SYSTEM,
                         payload=f"Carpeta raíz del proyecto: {project_path}",

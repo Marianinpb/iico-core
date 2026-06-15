@@ -42,10 +42,14 @@ class ShellBridge:
         default_timeout: float = 30.0,
         allowed_paths: list[Path] | None = None,
         python_executable: str | None = None,
+        project_root: Path | None = None,
     ):
         self.default_timeout = default_timeout
         self.allowed_paths = allowed_paths  # None = sin restricción de paths
         self.python_executable = python_executable or sys.executable
+        # cwd para ejecución de skills: la raíz del proyecto si está disponible,
+        # de lo contrario la carpeta de la skill (comportamiento anterior)
+        self.project_root = project_root
 
     # ------------------------------------------------------------------
     # Ejecución principal
@@ -103,6 +107,8 @@ class ShellBridge:
 
         args_json = json.dumps(args, ensure_ascii=False)
         start = time.perf_counter()
+        # Usar la raíz del proyecto como cwd; si no está configurada, usar la carpeta de la skill
+        effective_cwd = self.project_root if self.project_root and self.project_root.exists() else skill.executable_path.parent
 
         try:
             proc = subprocess.run(
@@ -111,7 +117,7 @@ class ShellBridge:
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                cwd=skill.executable_path.parent,
+                cwd=effective_cwd,
             )
             duration_ms = (time.perf_counter() - start) * 1000
 
@@ -164,6 +170,8 @@ class ShellBridge:
             env[f"SKILL_{key.upper()}"] = str(val)
         # También pasar el JSON completo
         env["SKILL_ARGS_JSON"] = json.dumps(args)
+        # Usar la raíz del proyecto como cwd; si no está configurada, usar la carpeta de la skill
+        effective_cwd = self.project_root if self.project_root and self.project_root.exists() else skill.executable_path.parent
 
         start = time.perf_counter()
         try:
@@ -173,7 +181,7 @@ class ShellBridge:
                 text=True,
                 timeout=timeout,
                 env=env,
-                cwd=skill.executable_path.parent,
+                cwd=effective_cwd,
             )
             duration_ms = (time.perf_counter() - start) * 1000
             return ToolResult(
