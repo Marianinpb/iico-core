@@ -65,6 +65,13 @@ class ReActLoop:
         tools = []
         if self.harness._skill_registry:
             tools = self.harness._skill_registry.get_tool_descriptions()
+            if tools:
+                system_prompt += (
+                    "\n\nATENCIÓN: TIENES HERRAMIENTAS (TOOLS) DISPONIBLES. "
+                    "DEBES usarlas (haciendo un tool call) para completar la tarea de forma autónoma "
+                    "en lugar de decirle al usuario cómo hacerlo. No le pidas al usuario que ejecute comandos. "
+                    "Ejecútalos tú mismo."
+                )
 
         messages: list[ChatMessage] = list(self.harness.history)
         retry_count = 0
@@ -333,8 +340,10 @@ class ReActLoop:
             f"## Tarea Actual: {task.id}\n"
             f"**Descripción:** {task.description}\n\n"
             f"**Metas a cumplir:**\n{goals_text}\n\n"
-            "Usa las herramientas disponibles para completar esta tarea. "
-            "Cuando hayas terminado, responde con un resumen de lo que hiciste."
+            "ATENCIÓN: TIENES HERRAMIENTAS (TOOLS) DISPONIBLES.\n"
+            "DEBES usarlas (haciendo un tool call) para completar la tarea de forma autónoma "
+            "en lugar de decirle al usuario cómo hacerlo. No le pidas al usuario que ejecute comandos. "
+            "Ejecútalos tú mismo. Cuando hayas terminado, responde con un resumen de lo que hiciste."
         )
 
         # Skills disponibles
