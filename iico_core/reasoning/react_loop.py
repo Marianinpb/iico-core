@@ -107,6 +107,7 @@ class ReActLoop:
             # Con tool_calls → ejecutar skills
             messages.append(ChatMessage(role="assistant", content=response.content or ""))
 
+            user_cancelled = False
             for tc in response.tool_calls:
                 # Mostrar qué skill/comando se va a ejecutar (con detalle de args)
                 yield HarnessEvent(
@@ -129,13 +130,17 @@ class ReActLoop:
                     if not approved:
                         messages.append(ChatMessage(
                             role="tool",
-                            content=json.dumps({"error": "Comando cancelado por el usuario."}),
+                            content=json.dumps({"error": "Comando cancelado por el usuario. No intentes re-ejecutar este comando ni ninguno similar."}),
                         ))
                         yield HarnessEvent(
                             type=HarnessEventType.SKILL_DONE,
                             payload={"skill": tc.name, "success": False, "cancelled": True},
                         )
-                        continue
+                        user_cancelled = True
+                        break  # sale del for tc (no del for step)
+
+                if user_cancelled:
+                    break
 
                 ok, retry_count = await self._execute_tool_call_async(tc, messages, retry_count)
                 if not ok and retry_count >= self.MAX_RETRIES_PER_STEP:
@@ -148,6 +153,27 @@ class ReActLoop:
                     type=HarnessEventType.SKILL_DONE,
                     payload={"skill": tc.name, "success": ok},
                 )
+
+            # Si el usuario canceló, hacer una sola llamada final sin tools
+            # para que el LLM explique qué iba a hacer y se detenga.
+            if user_cancelled:
+                final_response = await self.harness.llm.chat_with_tools(
+                    messages=messages,
+                    system_prompt=(
+                        system_prompt
+                        + "\n\nEl usuario acaba de cancelar un comando de terminal. "
+                        "Explica brevemente qué ibas a hacer y por qué. "
+                        "No propongas alternativas ni vuelvas a intentarlo. No hagas más tool calls."
+                    ),
+                    tools=[],  # sin tools → imposible que haga más tool_calls
+                )
+                if final_response.content:
+                    self.harness.history.append(
+                        ChatMessage(role="assistant", content=final_response.content)
+                    )
+                    yield HarnessEvent(type=HarnessEventType.TOKEN, payload=final_response.content)
+                yield HarnessEvent(type=HarnessEventType.DONE, payload="")
+                return
 
         # Límite de iteraciones alcanzado
         yield HarnessEvent(
@@ -232,13 +258,19 @@ class ReActLoop:
                     if not approved:
                         messages.append(ChatMessage(
                             role="tool",
-                            content=json.dumps({"error": "Comando cancelado por el usuario."}),
+                            content=json.dumps({"error": "Comando cancelado por el usuario. No intentes re-ejecutarlo."}),
                         ))
                         yield HarnessEvent(
                             type=HarnessEventType.SKILL_DONE,
                             payload={"skill": tc.name, "success": False, "cancelled": True},
                         )
-                        continue
+                        # En modo tarea, terminar la tarea como fallida y salir
+                        task.status = TaskStatus.FAILED
+                        yield HarnessEvent(
+                            type=HarnessEventType.TASK_FAILED,
+                            payload={"id": task.id, "error": "Comando cancelado por el usuario."},
+                        )
+                        return
 
                 ok, retry_count = await self._execute_tool_call_async(
                     tc, messages, retry_count
