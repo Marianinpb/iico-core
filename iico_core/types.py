@@ -126,7 +126,8 @@ class HarnessEventType(Enum):
     TASK_COMPLETED     = "task_completed"  # Task completada
     TASK_FAILED        = "task_failed"     # Task falló
     GOAL_VERIFIED      = "goal_verified"   # Meta comprobada
-    STATE_CHANGED      = "state_changed"   # Cambio de estado del agente
+    STATE_CHANGED      = "state_changed"   # Cambio de AgentState
+    TOKEN_USAGE        = "token_usage"     # Uso de tokens actualizados
     COMMAND_APPROVAL_REQUIRED = "command_approval_required"  # Pedir al usuario si puede ejecutar un comando
 
 
@@ -214,6 +215,7 @@ class LLMResponse:
     content: str                         # Texto de la respuesta
     tool_calls: list[LLMToolCall] = field(default_factory=list)
     finish_reason: str = "stop"          # "stop" | "tool_calls"
+    usage: dict[str, int] = field(default_factory=dict) # ej: {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
 
 
 # ---------------------------------------------------------------------------

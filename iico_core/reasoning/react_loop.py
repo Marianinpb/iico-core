@@ -87,6 +87,18 @@ class ReActLoop:
                 system_prompt=system_prompt,
                 tools=tools,
             )
+            if response.usage:
+                yield HarnessEvent(
+                    type=HarnessEventType.TOKEN_USAGE,
+                    payload=response.usage
+                )
+
+
+            if response.usage:
+                yield HarnessEvent(
+                    type=HarnessEventType.TOKEN_USAGE,
+                    payload=response.usage
+                )
 
             if response.finish_reason == "error":
                 yield HarnessEvent(
@@ -164,7 +176,19 @@ class ReActLoop:
                         + "\n\nEl usuario acaba de cancelar un comando de terminal. "
                         "Explica brevemente qué ibas a hacer y por qué. "
                         "No propongas alternativas ni vuelvas a intentarlo. No hagas más tool calls."
-                    ),
+                    )
+                if final_response.usage:
+                    yield HarnessEvent(
+                        type=HarnessEventType.TOKEN_USAGE,
+                        payload=final_response.usage
+                    )
+
+            if response.usage:
+                yield HarnessEvent(
+                    type=HarnessEventType.TOKEN_USAGE,
+                    payload=response.usage
+                )
+,
                     tools=[],  # sin tools → imposible que haga más tool_calls
                 )
                 if final_response.content:
@@ -219,6 +243,12 @@ class ReActLoop:
                 system_prompt=system_prompt,
                 tools=tools,
             )
+            if response.usage:
+                yield HarnessEvent(
+                    type=HarnessEventType.TOKEN_USAGE,
+                    payload=response.usage
+                )
+
 
             if response.finish_reason == "error":
                 task.status = TaskStatus.FAILED
@@ -233,7 +263,11 @@ class ReActLoop:
                 task.result_summary = response.content
                 break
 
-            messages.append(ChatMessage(role="assistant", content=response.content or ""))
+            messages.append(ChatMessage(
+                role="assistant", 
+                content=response.content or "",
+                tool_calls=response.tool_calls
+            ))
 
             all_ok = True
             for tc in response.tool_calls:
@@ -360,6 +394,7 @@ class ReActLoop:
                     "available": [s.name for s in self.harness._skill_registry]
                     if self.harness._skill_registry else [],
                 }),
+                tool_call_id=tc.call_id
             ))
             return False, retry_count + 1
 
@@ -367,6 +402,7 @@ class ReActLoop:
             messages.append(ChatMessage(
                 role="tool",
                 content=result.output or json.dumps({"status": "ok"}),
+                tool_call_id=tc.call_id
             ))
         else:
             messages.append(ChatMessage(
@@ -375,7 +411,8 @@ class ReActLoop:
                     "error": result.error or "Command failed",
                     "output": result.output,
                     "exit_code": result.exit_code
-                })
+                }),
+                tool_call_id=tc.call_id
             ))
         
         # Siempre retornamos True, 0 si la skill se ejecutó, incluso si falló

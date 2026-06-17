@@ -147,6 +147,11 @@ class OllamaClient:
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                usage={
+                    "prompt_tokens": data.get("prompt_eval_count", 0),
+                    "completion_tokens": data.get("eval_count", 0),
+                    "total_tokens": data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+                }
             )
         except Exception as e:
             return LLMResponse(
@@ -279,6 +284,7 @@ class OpenAIClient:
                 content=content,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                usage=data.get("usage", {}),
             )
         except Exception as e:
             return LLMResponse(
