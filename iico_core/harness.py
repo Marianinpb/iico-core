@@ -194,6 +194,16 @@ class Harness:
         # ─────────────────────────────────────────────────────────────
 
         if self._state == AgentState.INTERVIEWING and self._sdd_manager:
+            # Opción de escape manual
+            if text.lower() in ["cancelar", "salir", "exit", "stop", "abort", "abortar"]:
+                self._state = AgentState.IDLE
+                yield HarnessEvent(
+                    type=HarnessEventType.STATE_CHANGED,
+                    payload="🚫 Flujo de diseño SDD cancelado por el usuario.",
+                )
+                self.history.append(ChatMessage(role="system", content="[El usuario canceló el flujo SDD. Esperando nueva instrucción.]"))
+                return
+
             # El usuario está respondiendo preguntas de la entrevista SDD
             async for event in self._sdd_manager.process_answer(text):
                 yield event

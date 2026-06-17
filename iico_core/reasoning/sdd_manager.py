@@ -50,7 +50,8 @@ _TRIGGER_VERBS = {
 }
 
 # Longitud mínima del mensaje para considerar flujo SDD
-_MIN_TRIGGER_LENGTH = 40
+_MIN_TRIGGER_LENGTH = 100
+_MAX_INTERVIEW_ROUNDS = 2
 
 
 class SDDManager:
@@ -163,8 +164,11 @@ class SDDManager:
         self._interview_qa.append((questions_str, answer))
         self._questions_pending = []
 
-        # Preguntar al LLM si necesita más info
-        needs_more, new_questions = await self._check_completeness(answer)
+        # Preguntar al LLM si necesita más info (limitar rondas)
+        if len(self._interview_qa) >= _MAX_INTERVIEW_ROUNDS:
+            needs_more, new_questions = False, []
+        else:
+            needs_more, new_questions = await self._check_completeness(answer)
 
         if needs_more and new_questions:
             self._questions_pending = new_questions
@@ -192,19 +196,19 @@ class SDDManager:
         """Pide al LLM formular preguntas sobre la solicitud del usuario."""
         prompt = (
             f"El usuario quiere: \"{request}\"\n\n"
-            "Identifica hasta 4 aspectos técnicos o de diseño que no están claros "
-            "y que necesitas conocer para crear un plan de implementación detallado. "
-            "Si la solicitud ya es completamente clara, responde con una lista vacía.\n\n"
+            "Identifica hasta 2 aspectos técnicos CRÍTICOS que falten para crear un plan de implementación. "
+            "Si la solicitud es sencilla (ej. un hola mundo), responde con una lista vacía [].\n"
+            "NO hagas preguntas sobre el nivel de experiencia del usuario, su sistema operativo o preferencias triviales.\n\n"
             "Responde SOLO con un JSON array de strings. Ejemplo:\n"
-            '[\"¿Qué lenguaje de programación prefieres?\", \"¿Tienes alguna preferencia de formato de salida?\"]\n'
+            '[\"¿Qué framework web deberíamos usar para la API?\"]\n'
             "Si no necesitas más información: []"
         )
 
         response = await self.harness.llm.chat_with_tools(
             messages=[ChatMessage(role="user", content=prompt)],
             system_prompt=(
-                "Eres un analista de requisitos técnicos. "
-                "Responde únicamente con un JSON array de strings."
+                "Eres un arquitecto de software estricto. "
+                "Responde únicamente con un JSON array de strings. Evita preguntas innecesarias."
             ),
             tools=[],
         )
@@ -219,9 +223,10 @@ class SDDManager:
         prompt = (
             f"Contexto de la entrevista hasta ahora:\n{context}\n\n"
             f"Última respuesta del usuario: \"{latest_answer}\"\n\n"
-            "¿Necesitas más información para crear un plan detallado? "
-            "Si sí, formula máximo 3 preguntas adicionales. "
-            "Si no, responde con lista vacía.\n\n"
+            "¿Necesitas más información CRÍTICA que te impida programar o crear el plan? "
+            "NO preguntes por su experiencia, sistema operativo, preferencias personales ni nada trivial. "
+            "Si la tarea es sencilla, responde con needs_more en false. "
+            "Si de verdad necesitas info técnica, formula máximo 2 preguntas.\n\n"
             "Responde SOLO con JSON: "
             '{"needs_more": true/false, "questions": [...]}'
         )
@@ -229,7 +234,8 @@ class SDDManager:
         response = await self.harness.llm.chat_with_tools(
             messages=[ChatMessage(role="user", content=prompt)],
             system_prompt=(
-                "Eres un analista de requisitos. "
+                "Eres un analista técnico estricto. "
+                "Nunca pides información trivial o de usuario. "
                 "Responde solo con JSON válido."
             ),
             tools=[],
