@@ -105,7 +105,13 @@ class ShellBridge:
                 error=f"Script no encontrado: {skill.executable_path}",
             )
 
-        args_json = json.dumps(args, ensure_ascii=False)
+        args_copy = dict(args)
+        if self.project_root and self.project_root.exists():
+            args_copy["_project_root"] = str(self.project_root)
+        else:
+            args_copy["_project_root"] = str(Path.cwd())
+
+        args_json = json.dumps(args_copy, ensure_ascii=False)
         start = time.perf_counter()
         # Usar la raíz del proyecto como cwd; si no está configurada, usar la carpeta de la skill
         effective_cwd = self.project_root if self.project_root and self.project_root.exists() else skill.executable_path.parent
@@ -165,11 +171,20 @@ class ShellBridge:
 
         import os
         env = os.environ.copy()
+        
+        args_copy = dict(args)
+        if self.project_root and self.project_root.exists():
+            args_copy["_project_root"] = str(self.project_root)
+        else:
+            args_copy["_project_root"] = str(Path.cwd())
+
         # Pasar cada arg como variable de entorno SKILL_<KEY>=<value>
-        for key, val in args.items():
+        for key, val in args_copy.items():
             env[f"SKILL_{key.upper()}"] = str(val)
+        
         # También pasar el JSON completo
-        env["SKILL_ARGS_JSON"] = json.dumps(args)
+        env["SKILL_ARGS_JSON"] = json.dumps(args_copy)
+        
         # Usar la raíz del proyecto como cwd; si no está configurada, usar la carpeta de la skill
         effective_cwd = self.project_root if self.project_root and self.project_root.exists() else skill.executable_path.parent
 
