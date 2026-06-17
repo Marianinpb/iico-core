@@ -368,22 +368,21 @@ class ReActLoop:
                 role="tool",
                 content=result.output or json.dumps({"status": "ok"}),
             ))
-            return True, 0  # Reset reintentos
-
-        # Fallo: inyectar error para auto-corrección
-        retry_count += 1
-        messages.append(ChatMessage(
-            role="system",
-            content=(
-                f"La acción '{tc.name}' falló con el siguiente error:\n"
-                f"```\n{result.error}\n```\n"
-                "Analiza qué salió mal. Puedes:\n"
-                "1. Corregir los argumentos y llamar a la misma skill.\n"
-                "2. Usar una skill diferente que logre el mismo objetivo.\n"
-                "3. Si el error es irrecuperable, explica el problema."
-            ),
-        ))
-        return False, retry_count
+        else:
+            messages.append(ChatMessage(
+                role="tool",
+                content=json.dumps({
+                    "error": result.error or "Command failed",
+                    "output": result.output,
+                    "exit_code": result.exit_code
+                })
+            ))
+        
+        # Siempre retornamos True, 0 si la skill se ejecutó, incluso si falló
+        # (p.ej. comando inválido o archivo no encontrado). Esto permite al LLM
+        # ver la salida de error del comando y planear su siguiente paso,
+        # en lugar de activar la auto-corrección destructiva del framework.
+        return True, 0
 
     def _build_task_prompt(
         self,
