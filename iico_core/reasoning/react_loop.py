@@ -176,21 +176,16 @@ class ReActLoop:
                         + "\n\nEl usuario acaba de cancelar un comando de terminal. "
                         "Explica brevemente qué ibas a hacer y por qué. "
                         "No propongas alternativas ni vuelvas a intentarlo. No hagas más tool calls."
-                    )
+                    ),
+                    tools=[],  # sin tools → imposible que haga más tool_calls
+                )
+
                 if final_response.usage:
                     yield HarnessEvent(
                         type=HarnessEventType.TOKEN_USAGE,
                         payload=final_response.usage
                     )
-
-            if response.usage:
-                yield HarnessEvent(
-                    type=HarnessEventType.TOKEN_USAGE,
-                    payload=response.usage
-                )
-,
-                    tools=[],  # sin tools → imposible que haga más tool_calls
-                )
+                
                 if final_response.content:
                     self.harness.history.append(
                         ChatMessage(role="assistant", content=final_response.content)
