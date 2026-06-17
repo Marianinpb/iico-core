@@ -11,6 +11,7 @@ el flujo SDD y el bucle ReAct.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -25,13 +26,26 @@ from typing import Any
 @dataclass
 class ChatMessage:
     """Representa un mensaje en el historial de conversación."""
-    role: str          # "user", "assistant" o "system"
+    role: str          # "user", "assistant", "system" o "tool"
     content: str
     timestamp: datetime = field(default_factory=datetime.now)
+    tool_calls: list[LLMToolCall] | None = None
+    tool_call_id: str | None = None
 
-    def to_dict(self) -> dict[str, str]:
+    def to_dict(self) -> dict[str, Any]:
         """Formato compatible con la API de Ollama / OpenAI."""
-        return {"role": self.role, "content": self.content}
+        d = {"role": self.role, "content": self.content}
+        if self.tool_calls:
+            d["tool_calls"] = [
+                {
+                    "id": tc.call_id,
+                    "type": "function",
+                    "function": {"name": tc.name, "arguments": json.dumps(tc.args)}
+                } for tc in self.tool_calls
+            ]
+        if self.tool_call_id:
+            d["tool_call_id"] = self.tool_call_id
+        return d
 
 
 # ---------------------------------------------------------------------------
