@@ -67,10 +67,13 @@ class ReActLoop:
             tools = self.harness._skill_registry.get_tool_descriptions()
             if tools:
                 system_prompt += (
-                    "\n\nATENCIÓN: TIENES HERRAMIENTAS (TOOLS) DISPONIBLES. "
-                    "DEBES usarlas (haciendo un tool call) para completar la tarea de forma autónoma "
-                    "en lugar de decirle al usuario cómo hacerlo. No le pidas al usuario que ejecute comandos. "
-                    "Ejecútalos tú mismo."
+                    "\n\n## REGLAS OBLIGATORIAS DE TOOL CALLING\n"
+                    "1. TIENES herramientas (tools) disponibles. DEBES usarlas.\n"
+                    "2. Si necesitas crear un archivo → usa write_file.\n"
+                    "3. Si necesitas ejecutar un comando → usa run_command.\n"
+                    "4. NUNCA respondas con texto explicando cómo hacerlo. HAZ la acción con un tool call.\n"
+                    "5. NUNCA digas 'no tengo acceso' ni 'no puedo ejecutar'. SÍ PUEDES usando las tools.\n"
+                    "6. NUNCA le pidas al usuario que haga algo que tú puedes hacer con una tool.\n"
                 )
 
         messages: list[ChatMessage] = list(self.harness.history)
@@ -87,13 +90,6 @@ class ReActLoop:
                 system_prompt=system_prompt,
                 tools=tools,
             )
-            if response.usage:
-                yield HarnessEvent(
-                    type=HarnessEventType.TOKEN_USAGE,
-                    payload=response.usage
-                )
-
-
             if response.usage:
                 yield HarnessEvent(
                     type=HarnessEventType.TOKEN_USAGE,

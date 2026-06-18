@@ -107,7 +107,7 @@ class OllamaClient:
         system_prompt: str,
         tools: list[dict],
     ) -> LLMResponse:
-        """Llama a Ollama con tool calling nativo (soportado desde v0.1.24)."""
+        """Llama a Ollama con tool calling nativo. Si el modelo no lo soporta, usa fallback por prompt."""
         payload_messages = [{"role": "system", "content": system_prompt}]
         payload_messages += [m.to_dict() for m in messages]
 
@@ -124,6 +124,15 @@ class OllamaClient:
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(self._chat_url, json=payload)
+
+                # Si el modelo no soporta tools nativas → fallback por prompt
+                if r.status_code == 400 and tools:
+                    error_body = r.text
+                    if "does not support tools" in error_body:
+                        return await self._chat_with_tools_fallback(
+                            payload_messages, system_prompt, tools, timeout
+                        )
+
                 r.raise_for_status()
                 data = r.json()
 
@@ -158,6 +167,131 @@ class OllamaClient:
                 content=f"[Error en tool calling: {e}]",
                 finish_reason="error",
             )
+
+    async def _chat_with_tools_fallback(
+        self,
+        original_messages: list[dict],
+        system_prompt: str,
+        tools: list[dict],
+        timeout: httpx.Timeout,
+    ) -> LLMResponse:
+        """
+        Fallback para modelos que no soportan tool calling nativo en Ollama.
+        Inyecta las tools como texto en el system prompt y parsea la respuesta JSON.
+        """
+        # Construir descripción de tools para el prompt
+        tools_desc = []
+        for t in tools:
+            fn = t.get("function", {})
+            name = fn.get("name", "")
+            desc = fn.get("description", "")
+            params = fn.get("parameters", {}).get("properties", {})
+            required = fn.get("parameters", {}).get("required", [])
+            param_lines = []
+            for pname, pinfo in params.items():
+                req_mark = " (requerido)" if pname in required else ""
+                param_lines.append(f"    - {pname}: {pinfo.get('description', pinfo.get('type', 'string'))}{req_mark}")
+            tools_desc.append(f"  {name}: {desc}\n" + "\n".join(param_lines))
+
+        tools_text = "\n".join(tools_desc)
+
+        augmented_prompt = (
+            f"{system_prompt}\n\n"
+            f"## Herramientas disponibles\n{tools_text}\n\n"
+            "## Instrucciones de tool calling\n"
+            "Para usar una herramienta, responde ÚNICAMENTE con un bloque JSON así:\n"
+            "```json\n"
+            '{"tool_call": {"name": "NOMBRE_TOOL", "arguments": {"param1": "valor1"}}}\n'
+            "```\n"
+            "NO escribas ningún otro texto fuera del bloque JSON si necesitas usar una herramienta.\n"
+            "Si no necesitas usar herramientas, responde normalmente con texto."
+        )
+
+        # Reemplazar el system prompt en los mensajes
+        fallback_messages = [{"role": "system", "content": augmented_prompt}]
+        fallback_messages += original_messages[1:]  # Skip old system msg
+
+        payload = {
+            "model": self.model,
+            "messages": fallback_messages,
+            "stream": False,
+            "options": {"temperature": self.temperature},
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                r = await client.post(self._chat_url, json=payload)
+                r.raise_for_status()
+                data = r.json()
+
+            message = data.get("message", {})
+            content = (message.get("content") or "").strip()
+            usage = {
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+                "total_tokens": data.get("prompt_eval_count", 0) + data.get("eval_count", 0),
+            }
+
+            # Intentar parsear tool call del contenido
+            tool_calls = self._parse_tool_call_from_text(content)
+            if tool_calls:
+                return LLMResponse(
+                    content="",
+                    tool_calls=tool_calls,
+                    finish_reason="tool_calls",
+                    usage=usage,
+                )
+
+            return LLMResponse(
+                content=content,
+                tool_calls=[],
+                finish_reason="stop",
+                usage=usage,
+            )
+        except Exception as e:
+            return LLMResponse(
+                content=f"[Error en fallback tool calling: {e}]",
+                finish_reason="error",
+            )
+
+    @staticmethod
+    def _parse_tool_call_from_text(text: str) -> list[LLMToolCall]:
+        """Intenta extraer un tool_call de texto libre del modelo."""
+        import re as _re
+
+        # Buscar bloque JSON con tool_call
+        # Soporta ```json ... ``` o JSON directo
+        patterns = [
+            _re.compile(r'```json\s*\n?(.*?)\n?\s*```', _re.DOTALL),
+            _re.compile(r'(\{[^{}]*"tool_call"[^{}]*\{.*?\}[^{}]*\})', _re.DOTALL),
+        ]
+
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match:
+                try:
+                    data = json.loads(match.group(1) if '```' in pattern.pattern else match.group(0))
+                    tc = data.get("tool_call", {})
+                    name = tc.get("name", "")
+                    args = tc.get("arguments", {})
+                    if name:
+                        return [LLMToolCall(call_id="fallback_0", name=name, args=args)]
+                except (json.JSONDecodeError, AttributeError):
+                    pass
+
+        # Intentar parsear JSON puro sin wrapper
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                tc = data.get("tool_call", {})
+                name = tc.get("name", "")
+                args = tc.get("arguments", {})
+                if name:
+                    return [LLMToolCall(call_id="fallback_0", name=name, args=args)]
+        except json.JSONDecodeError:
+            pass
+
+        return []
 
     async def fetch_models(self) -> list[str]:
         try:
