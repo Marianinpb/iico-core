@@ -193,6 +193,7 @@ class Harness:
         # Máquina de estados Fase 3
         # ─────────────────────────────────────────────────────────────
 
+        print(f"[Harness DEBUG] Estado: {self._state}, react_loop={self._react_loop is not None}, sdd={self._sdd_manager is not None}")
         if self._state == AgentState.INTERVIEWING and self._sdd_manager:
             # Opción de escape manual
             if text.lower() in ["cancelar", "salir", "exit", "stop", "abort", "abortar"]:
@@ -251,10 +252,12 @@ class Harness:
         # Detección de intención SDD (estado IDLE)
         # ─────────────────────────────────────────────────────────────
 
+        sdd_trigger = self._sdd_manager.should_trigger(text) if self._sdd_manager else False
+        print(f"[Harness DEBUG] SDD should_trigger={sdd_trigger}, text_len={len(text)}, use_react_loop={self.config.use_react_loop}")
         if (
             self.config.use_react_loop
             and self._sdd_manager
-            and self._sdd_manager.should_trigger(text)
+            and sdd_trigger
         ):
             self._state = AgentState.INTERVIEWING
             self.history.append(ChatMessage(role="user", content=text))
@@ -266,6 +269,7 @@ class Harness:
         # ReAct directo (Fase 3, sin plan SDD)
         # ─────────────────────────────────────────────────────────────
 
+        print(f"[Harness DEBUG] -> Entrando a ReAct loop")
         if self.config.use_react_loop and self._react_loop:
             self.history.append(ChatMessage(role="user", content=text))
             async for event in self._react_loop.execute_simple(text):
@@ -276,6 +280,7 @@ class Harness:
         # Fallback: chat normal (Fase 2)
         # ─────────────────────────────────────────────────────────────
 
+        print(f"[Harness DEBUG] -> Fallback a chat_stream (SIN tools)")
         self.history.append(ChatMessage(role="user", content=text))
         system_prompt = self.build_system_prompt(query=text)
 

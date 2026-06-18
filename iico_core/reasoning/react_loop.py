@@ -85,11 +85,23 @@ class ReActLoop:
                 payload=f"Razonando (paso {step + 1})...",
             )
 
+            # DEBUG: Log para diagnóstico
+            print(f"[ReAct DEBUG] Paso {step+1}: tools={len(tools)}, "
+                  f"msgs={len(messages)}, sys_prompt_len={len(system_prompt)}")
+            if tools:
+                print(f"[ReAct DEBUG] Tools: {[t.get('function',{}).get('name','?') for t in tools[:5]]}")
+
             response = await self.harness.llm.chat_with_tools(
                 messages=messages,
                 system_prompt=system_prompt,
                 tools=tools,
             )
+
+            print(f"[ReAct DEBUG] Respuesta: finish_reason={response.finish_reason}, "
+                  f"tool_calls={len(response.tool_calls)}, "
+                  f"content_len={len(response.content)}, "
+                  f"content_preview={repr(response.content[:100])}")
+
             if response.usage:
                 yield HarnessEvent(
                     type=HarnessEventType.TOKEN_USAGE,
@@ -105,6 +117,7 @@ class ReActLoop:
 
             # Sin tool_calls → respuesta final
             if not response.tool_calls:
+                print(f"[ReAct DEBUG] SIN tool calls. Modelo respondió con texto.")
                 self.harness.history.append(
                     ChatMessage(role="assistant", content=response.content)
                 )
