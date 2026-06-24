@@ -11,14 +11,15 @@ from .types import (
     LLMToolCall,
     ProviderConfig,
     SDDDocument,
-    SkillDefinition,
+    ToolDefinition,
     TaskGoal,
     TaskStatus,
     TaskTemplate,
     ToolResult,
 )
 from .llm_client import create_client
-from .memory.active import SkillRegistry
+from .memory.active import ToolRegistry
+from .memory.skills import SkillLibrary
 from .bridge.shell import ShellBridge
 from .index.splay_tree import SplayTree, SplayCacheMetrics
 
@@ -32,7 +33,7 @@ __all__ = [
     "HarnessEvent",
     "HarnessEventType",
     "ProviderConfig",
-    "SkillDefinition",
+    "ToolDefinition",
     "ToolResult",
     # Types Fase 3
     "AgentState",
@@ -43,7 +44,8 @@ __all__ = [
     "TaskStatus",
     "TaskTemplate",
     # Subsistemas
-    "SkillRegistry",
+    "SkillLibrary",
+    "ToolRegistry",
     "ShellBridge",
     "SplayTree",
     "SplayCacheMetrics",

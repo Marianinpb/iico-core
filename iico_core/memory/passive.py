@@ -23,9 +23,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import TYPE_CHECKING, Iterator
 
 import frontmatter  # python-frontmatter
+
+if TYPE_CHECKING:
+    from ..types import Chunk
+
+from ..types import Chunk
+from .chunk_store import ChunkStore
+from .chunker import Chunker
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +67,15 @@ class PassiveMemory:
 
     def __init__(self, memory_path: Path | str = "memory_store"):
         self.memory_path = Path(memory_path)
-        self._notes: dict[str, PassiveNote] = {}   # id → nota
+        self._notes: dict[str, PassiveNote] = {}   # id → nota (backward compat)
+        self._chunks: dict[str, Chunk] = {}         # chunk_id → Chunk
+
+        # ChunkStore: persistencia de chunks en .chunks/
+        self._chunk_store = ChunkStore(self.memory_path / ".chunks")
+
+        # Chunker: divide notas en chunks estructurales (sin semantic splitter)
+        self._chunker = Chunker(max_chunk_tokens=512)
+
         self.load_all()
 
     # ------------------------------------------------------------------
@@ -68,16 +83,32 @@ class PassiveMemory:
     # ------------------------------------------------------------------
 
     def load_all(self) -> None:
-        """Parsea todas las notas .md del directorio memory_store/."""
+        """Parsea todas las notas .md del directorio memory_store/ y carga chunks."""
         self._notes.clear()
+        self._chunks.clear()
+
         if not self.memory_path.exists():
             self.memory_path.mkdir(parents=True, exist_ok=True)
             return
 
+        # 1. Cargar notas originales
         for path in self.memory_path.glob("*.md"):
             note = self._parse_note(path)
             if note:
                 self._notes[note.id] = note
+
+        # 2. Cargar chunks del ChunkStore (o crear si no existen)
+        stored_chunks = self._chunk_store.load_chunks()
+        if stored_chunks:
+            for chunk in stored_chunks:
+                self._chunks[chunk.id] = chunk
+        else:
+            # Primera ejecución: chunkear todas las notas
+            for note in self._notes.values():
+                chunks = self._chunker.chunk_note(note)
+                for chunk in chunks:
+                    self._chunk_store.save_chunk(chunk)
+                    self._chunks[chunk.id] = chunk
 
     def _parse_note(self, path: Path) -> PassiveNote | None:
         try:
@@ -111,25 +142,30 @@ class PassiveMemory:
         query: str,
         method: str = "tags",
         max_results: int = 5,
-    ) -> list[PassiveNote]:
+    ) -> list[Chunk]:
         """
-        Devuelve notas relevantes para el query dado.
+        Devuelve chunks relevantes para el query dado.
 
         Fase 1 — method='tags':
-            Extrae palabras del query y las compara contra los tags de cada nota.
-            Las notas con más coincidencias de tags aparecen primero.
+            Extrae palabras del query y las compara contra los tags de cada chunk.
+            Los chunks con más coincidencias de tags aparecen primero.
             Empate resuelto por prioridad.
+
+        Fase 2 — method='embeddings':
+            Manejado externamente por EmbeddingIndex.search().
+            PassiveMemory devuelve [] para que el Harness use el índice semántico.
         """
-        if not self._notes:
-            return []
-
         if method == "tags":
-            return self._search_by_tags(query, max_results)
+            return self._search_chunks_by_tags(query, max_results)
 
-        # Fase 2: "embeddings" — placeholder hasta que se implemente ONNX
+        # "embeddings": manejado externamente por EmbeddingIndex.search()
         return []
 
-    def _search_by_tags(self, query: str, max_results: int) -> list[PassiveNote]:
+    def _search_chunks_by_tags(self, query: str, max_results: int) -> list[Chunk]:
+        """Búsqueda determinista por tags sobre los chunks."""
+        if not self._chunks:
+            return []
+
         # Normalizar: quitar tildes y caracteres especiales para la comparación
         normalized = self._normalize(query)
         # Tokenizar: palabras de ≥2 letras, en minúsculas
@@ -137,16 +173,16 @@ class PassiveMemory:
             w for w in re.findall(r"\b\w{2,}\b", normalized)
         )
         if not query_words:
-            # Sin palabras útiles: devolver las notas de mayor prioridad
-            return sorted(self._notes.values(), key=lambda n: -n.priority)[:max_results]
+            # Sin palabras útiles: devolver los chunks de mayor prioridad
+            return sorted(self._chunks.values(), key=lambda c: -c.priority)[:max_results]
 
-        scored: list[tuple[int, int, PassiveNote]] = []
-        for note in self._notes.values():
+        scored: list[tuple[int, int, Chunk]] = []
+        for chunk in self._chunks.values():
             # También normalizar los tags para comparación justa
-            tag_set = set(self._normalize(t) for t in note.tags)
+            tag_set = set(self._normalize(t) for t in chunk.tags)
             matches = len(query_words & tag_set)
             if matches > 0:
-                scored.append((matches, note.priority, note))
+                scored.append((matches, chunk.priority, chunk))
 
         # Ordenar: más coincidencias primero, luego por prioridad
         scored.sort(key=lambda x: (-x[0], -x[1]))
@@ -165,19 +201,19 @@ class PassiveMemory:
 
     def apply_token_budget(
         self,
-        notes: list[PassiveNote],
+        chunks: list[Chunk],
         max_tokens: int,
-    ) -> list[PassiveNote]:
+    ) -> list[Chunk]:
         """
-        Selecciona las notas que caben dentro del presupuesto de tokens.
+        Selecciona los chunks que caben dentro del presupuesto de tokens.
         Ordena por prioridad (mayor primero) y corta cuando se excede el límite.
         """
-        selected: list[PassiveNote] = []
+        selected: list[Chunk] = []
         used = 0
-        for note in sorted(notes, key=lambda n: -n.priority):
-            est = note.token_estimate()
+        for chunk in sorted(chunks, key=lambda c: -c.priority):
+            est = chunk.token_estimate()
             if used + est <= max_tokens:
-                selected.append(note)
+                selected.append(chunk)
                 used += est
         return selected
 
@@ -192,7 +228,7 @@ class PassiveMemory:
         tags: list[str],
         priority: int = 5,
     ) -> PassiveNote:
-        """Crea y persiste una nota nueva en memory_store/."""
+        """Crea y persiste una nota nueva en memory_store/, luego la chunkea."""
         self.memory_path.mkdir(parents=True, exist_ok=True)
         path = self.memory_path / f"{note_id}.md"
 
@@ -214,19 +250,28 @@ class PassiveMemory:
             source_path=path,
         )
         self._notes[note_id] = note
+
+        # Chunkear la nota y guardar los chunks
+        chunks = self._chunker.chunk_note(note)
+        for chunk in chunks:
+            self._chunk_store.save_chunk(chunk)
+            self._chunks[chunk.id] = chunk
+
         return note
 
     # ------------------------------------------------------------------
     # Formato para inyectar en el system prompt
     # ------------------------------------------------------------------
 
-    def format_for_prompt(self, notes: list[PassiveNote]) -> str:
-        """Convierte una lista de notas a texto para el system prompt."""
-        if not notes:
+    def format_for_prompt(self, chunks: list[Chunk]) -> str:
+        """Convierte una lista de chunks a texto para el system prompt."""
+        if not chunks:
             return ""
         parts = ["## Contexto relevante de tu memoria\n"]
-        for note in notes:
-            parts.append(f"### {note.id} [tags: {', '.join(note.tags)}]\n{note.content}\n")
+        for chunk in chunks:
+            parts.append(
+                f"### {chunk.title} (de {chunk.parent_note_id})\n{chunk.content}\n"
+            )
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -236,6 +281,10 @@ class PassiveMemory:
     @property
     def notes(self) -> dict[str, PassiveNote]:
         return self._notes
+
+    @property
+    def chunks(self) -> dict[str, Chunk]:
+        return self._chunks
 
     def __len__(self) -> int:
         return len(self._notes)

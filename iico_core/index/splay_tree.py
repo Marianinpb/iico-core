@@ -4,13 +4,13 @@ iico_core/index/splay_tree.py
 Árbol Splay como Caché de Nivel 2 (Característica 3).
 
 ARQUITECTURA: Este árbol NO es el índice primario de notas/skills.
-Es una caché de trabajo rápida que almacena SOLO nodos previamente
+Es una caché de trabajo rápida que almacena SOLO chunks previamente
 validados por el Nivel 1 (EmbeddingIndex). El flujo es:
 
-    1. Consultar raíz/hijos del Splay → hit? → usar sin vectorizar
+    1. Consultar raíz/hijos del Splay → hit? → usar chunk sin re-vectorizar
     2. Miss → delegar a EmbeddingIndex (Nivel 1)
-    3. Resultado del Nivel 1 → insertar en el Splay
-    4. Nodos obsoletos migran naturalmente hacia las hojas
+    3. Chunk resultado del Nivel 1 → insertar en el Splay
+    4. Chunks obsoletos migran naturalmente hacia las hojas
 
 Propiedades del Splay Tree:
 - search(x): O(log n) amortizado — splayea x a la raíz
@@ -35,8 +35,8 @@ from typing import Any
 @dataclass
 class SplayNode:
     """Nodo del Splay Tree."""
-    key: str                     # ID de la nota o skill
-    value: Any                   # PassiveNote o SkillDefinition
+    key: str                     # ID del chunk o tool
+    value: Any                   # Chunk o ToolDefinition
     left:  "SplayNode | None" = field(default=None, repr=False)
     right: "SplayNode | None" = field(default=None, repr=False)
     parent: "SplayNode | None" = field(default=None, repr=False)
@@ -119,19 +119,20 @@ class SplayCacheMetrics:
 
 class SplayTree:
     """
-    Árbol Splay auto-ajustable.
+    Caché de chunks auto-ajustable (Nivel 2).
 
     Implementación pura en Python sin dependencias externas.
-    Cada operación de búsqueda splayea el nodo encontrado a la raíz,
-    lo que garantiza localidad temporal: los nodos más accedidos
+    Cada operación de búsqueda splayea el chunk encontrado a la raíz,
+    lo que garantiza localidad temporal: los chunks más accedidos
     permanecen cerca de la raíz con costo de acceso ≈ O(1).
     """
 
     def __init__(self, max_nodes: int = 50, metrics: SplayCacheMetrics | None = None):
         """
         Args:
-            max_nodes: capacidad máxima del caché. Cuando se supera, se
-                       evictan los nodos más profundos (menos frecuentes).
+            max_nodes: capacidad máxima del caché (en cantidad de chunks).
+                       Cuando se supera, se evictan los nodos más profundos
+                       (menos frecuentes).
             metrics: colector de métricas. Si es None, se crea uno interno.
         """
         self._root: SplayNode | None = None

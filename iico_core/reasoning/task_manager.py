@@ -100,8 +100,8 @@ class TaskManager:
             '      "id": "task_1",\n'
             '      "description": "Descripción clara de la tarea",\n'
             '      "goals": [\n'
-            '        {"description": "Meta comprobable 1", "verification_skill": null},\n'
-            '        {"description": "Meta comprobable 2", "verification_skill": "list_files"}\n'
+            '        {"description": "Meta comprobable 1", "verification_tool": null},\n'
+            '        {"description": "Meta comprobable 2", "verification_tool": "list_files"}\n'
             "      ],\n"
             '      "depends_on": []\n'
             "    }\n"
@@ -112,7 +112,7 @@ class TaskManager:
             "- Máximo 8 tareas.\n"
             "- Las dependencias (depends_on) deben ser IDs de tareas anteriores.\n"
             "- Las metas deben ser verificables y concretas.\n"
-            "- verification_skill puede ser: list_files, read_file_snippet, "
+            "- verification_tool puede ser: list_files, read_file_snippet, "
             "read_csv_head, compile_latex, compile_mermaid, o null.\n"
             "- Responde SOLO con el JSON, sin texto adicional."
         )
@@ -152,7 +152,7 @@ class TaskManager:
             goals = [
                 TaskGoal(
                     description=g.get("description", ""),
-                    verification_skill=g.get("verification_skill"),
+                    verification_tool=g.get("verification_tool"),
                 )
                 for g in t.get("goals", [])
             ]
@@ -327,7 +327,7 @@ class TaskManager:
         for task in self._tasks.values():
             goals_md = "\n".join(
                 f"- {g.description}"
-                + (f" [verifica: `{g.verification_skill}`]" if g.verification_skill else "")
+                + (f" [verifica: `{g.verification_tool}`]" if g.verification_tool else "")
                 for g in task.goals
             )
             content = (

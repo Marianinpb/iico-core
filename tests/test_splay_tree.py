@@ -1,7 +1,7 @@
 """
 tests/test_splay_tree.py
 =========================
-Tests unitarios del Splay Tree y SplayCacheMetrics.
+Tests unitarios del Splay Tree (caché de chunks Nivel 2) y SplayCacheMetrics.
 """
 
 import pytest
@@ -9,7 +9,7 @@ from iico_core.index.splay_tree import SplayCacheMetrics, SplayNode, SplayTree
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures (árbol con chunks de prueba)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def tree():
 
 @pytest.fixture
 def small_tree():
-    """Árbol con 5 nodos pre-insertados."""
+    """Árbol con 5 chunks pre-insertados."""
     t = SplayTree(max_nodes=10)
     for k in ["e", "b", "d", "a", "c"]:
         t.insert(k, f"val_{k}")

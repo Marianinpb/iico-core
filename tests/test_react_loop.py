@@ -14,17 +14,17 @@ def harness_with_mock_llm():
     cfg = HarnessConfig(
         provider=ProviderConfig(type="openai", endpoint="http://localhost:11434/v1", model="test"),
         memory_path=Path("dummy_memory"),
-        skills_path=Path("dummy_skills")
+        tools_path=Path("dummy_tools")
     )
     harness = Harness(cfg)
     harness.llm = AsyncMock()
-    harness._skill_registry = MagicMock()
-    harness._skill_registry.get_tool_descriptions.return_value = []
-    harness._skill_registry.format_for_prompt.return_value = "Mocked skills text"
+    harness._tool_registry = MagicMock()
+    harness._tool_registry.get_tool_descriptions.return_value = []
+    harness._tool_registry.format_for_prompt.return_value = "Mocked tools text"
     
-    # Mock execute_skill directly returning a successful result
+    # Mock execute_tool directly returning a successful result
     from iico_core.bridge.shell import ToolResult
-    harness.execute_skill = MagicMock(return_value=ToolResult("test_skill", "success", 0))
+    harness.execute_tool = MagicMock(return_value=ToolResult("test_tool", "success", 0))
     return harness
 
 @pytest.mark.asyncio
@@ -35,7 +35,7 @@ async def test_react_loop_execute_simple(harness_with_mock_llm):
     harness_with_mock_llm.llm.chat_with_tools.side_effect = [
         LLMResponse(
             content="", 
-            tool_calls=[LLMToolCall(call_id="call_1", name="test_skill", args={})],
+            tool_calls=[LLMToolCall(call_id="call_1", name="test_tool", args={})],
             finish_reason="tool_calls"
         ),
         LLMResponse(
@@ -52,12 +52,12 @@ async def test_react_loop_execute_simple(harness_with_mock_llm):
     # Assert events
     event_types = [e.type for e in events]
     assert HarnessEventType.THINKING in event_types
-    assert HarnessEventType.SKILL_START in event_types
-    assert HarnessEventType.SKILL_DONE in event_types
+    assert HarnessEventType.TOOL_START in event_types
+    assert HarnessEventType.TOOL_DONE in event_types
     assert HarnessEventType.DONE in event_types
     
-    assert harness_with_mock_llm.execute_skill.call_count == 1
-    assert harness_with_mock_llm.execute_skill.call_args[0][0] == "test_skill"
+    assert harness_with_mock_llm.execute_tool.call_count == 1
+    assert harness_with_mock_llm.execute_tool.call_args[0][0] == "test_tool"
 
 @pytest.mark.asyncio
 async def test_react_loop_execute_task(harness_with_mock_llm):
@@ -67,7 +67,7 @@ async def test_react_loop_execute_task(harness_with_mock_llm):
     task = TaskTemplate(
         id="t1", 
         description="Do something", 
-        goals=[TaskGoal(description="Goal 1", verification_skill="verify_test")]
+        goals=[TaskGoal(description="Goal 1", verification_tool="verify_test")]
     )
     
     # LLM returns string directly
@@ -92,7 +92,7 @@ async def test_react_loop_execute_task(harness_with_mock_llm):
     assert task.status == TaskStatus.COMPLETED
     assert task.result_summary == "Task is done"
     
-    # Verification skill was called
-    assert harness_with_mock_llm.execute_skill.call_count == 1
-    assert harness_with_mock_llm.execute_skill.call_args[0][0] == "verify_test"
+    # Verification tool was called
+    assert harness_with_mock_llm.execute_tool.call_count == 1
+    assert harness_with_mock_llm.execute_tool.call_args[0][0] == "verify_test"
 

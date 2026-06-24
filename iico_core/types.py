@@ -4,7 +4,7 @@ iico_core/types.py
 Dataclasses y tipos compartidos que definen el contrato entre el núcleo (Harness)
 y cualquier interfaz de usuario (TUI, Open WebUI, etc.).
 
-Fase 2: se agregan SkillDefinition y ToolResult para el sistema de skills.
+Fase 2: se agregan ToolDefinition y ToolResult para el sistema de tools.
 Fase 3: se agregan AgentState, TaskTemplate, SDDDocument y LLMResponse para
 el flujo SDD y el bucle ReAct.
 """
@@ -55,10 +55,11 @@ class ChatMessage:
 @dataclass
 class ProviderConfig:
     """Configuración de un proveedor de LLM."""
-    type: str          # "ollama" | "openai"
+    type: str          # "ollama" | "openai" | "deepseek"
     endpoint: str
     model: str
     temperature: float = 0.7
+    api_key: str = ""  # Clave API para proveedores que requieren auth (OpenAI, DeepSeek)
 
 
 @dataclass
@@ -69,6 +70,7 @@ class HarnessConfig:
 
     # Rutas de datos
     memory_path: Path = field(default_factory=lambda: Path("memory_store"))
+    tools_path: Path = field(default_factory=lambda: Path("tools"))
     skills_path: Path = field(default_factory=lambda: Path("skills"))
 
     # Comportamiento del Arnés
@@ -80,7 +82,11 @@ class HarnessConfig:
     use_splay_tree: bool = True
     use_embedding_search: bool = False   # Requiere iico-core[embeddings] instalado
     use_react_loop: bool = False         # Se activa en Fase 3
-    use_skills: bool = False             # Activa SkillRegistry + ShellBridge
+    use_tools: bool = False             # Activa ToolRegistry + ShellBridge
+    use_skills: bool = False            # Activa SkillLibrary (workflows .md)
+
+    # --- Chunking (Característica 4: Memoria Particionada) ---
+    use_chunking: bool = False  # Activar chunking en vez de notas completas
 
     # --- Splay Tree (Nivel 2) ---
     splay_cache_size: int = 50           # Máximo de nodos en el Splay Tree
@@ -90,8 +96,8 @@ class HarnessConfig:
     embedding_threshold: float = 0.50   # Umbral mínimo de similitud del coseno (MiniLM en español: 0.4-0.65)
     max_context_notes: int = 5          # Máximo de notas a inyectar en el prompt
 
-    # --- Skills ---
-    skill_timeout: float = 30.0         # Timeout en segundos para ejecución de skills
+    # --- Tools ---
+    tool_timeout: float = 30.0         # Timeout en segundos para ejecución de tools
     require_command_confirmation: bool = True   # Pedir confirmación antes de run_command
 
     # System prompt base
@@ -115,8 +121,8 @@ class HarnessEventType(Enum):
     ERROR              = "error"           # Error recuperable
     SYSTEM             = "system"          # Mensaje de sistema
     THINKING           = "thinking"        # El agente está razonando
-    SKILL_START        = "skill_start"     # Inicio de ejecución de una skill
-    SKILL_DONE         = "skill_done"      # Fin de ejecución de una skill
+    TOOL_START        = "tool_start"     # Inicio de ejecución de una tool
+    TOOL_DONE         = "tool_done"      # Fin de ejecución de una tool
     PLAN_UPDATE        = "plan_update"     # Actualización del plan de tareas
     # --- Fase 3: SDD y ReAct ---
     SDD_STARTED        = "sdd_started"     # Se inició un flujo SDD
@@ -165,7 +171,7 @@ class TaskStatus(Enum):
 class TaskGoal:
     """Meta comprobable de una tarea."""
     description: str
-    verification_skill: str | None = None  # Nombre de la skill para verificar
+    verification_tool: str | None = None  # Nombre de la tool para verificar
     verification_args: dict = field(default_factory=dict)
     met: bool = False
 
@@ -198,6 +204,34 @@ class SDDDocument:
 
 
 # ---------------------------------------------------------------------------
+# Fase 4: Chunking de Notas (Memoria Particionada)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Chunk:
+    """Fragmento de una nota, generado por el Chunker.
+
+    Cada nota de la memoria pasiva puede dividirse en múltiples chunks
+    (uno por sección o párrafo semántico). Los chunks heredan prioridad
+    y tags del parent, pero tienen contenido acotado (~50-300 tokens).
+    """
+    id: str                           # ej: "arquitectura_harness::splay-rotations"
+    parent_note_id: str               # ej: "arquitectura_harness"
+    title: str                        # ej: "Rotaciones Splay"
+    content: str                      # texto del chunk (~50-300 tokens)
+    tags: list[str] = field(default_factory=list)
+    priority: int = 5                 # heredado del parent
+    order: int = 0                    # posición secuencial dentro de la nota original
+    source_path: "Path | None" = None       # ruta al .md del chunk
+    embedding_path: "Path | None" = None    # ruta al .npy del chunk
+    content_hash: str = ""            # sha256 del content
+
+    def token_estimate(self) -> int:
+        """Estimación rápida de tokens (1 token ≈ 4 caracteres en español)."""
+        return len(self.content) // 4
+
+
+# ---------------------------------------------------------------------------
 # Fase 3: Respuesta del LLM con Tool Calls
 # ---------------------------------------------------------------------------
 
@@ -205,7 +239,7 @@ class SDDDocument:
 class LLMToolCall:
     """Tool call emitido por el LLM (formato nativo Ollama/OpenAI)."""
     call_id: str                         # ID único de la llamada
-    name: str                            # Nombre de la skill
+    name: str                            # Nombre de la tool
     args: dict[str, Any] = field(default_factory=dict)
 
 
@@ -224,7 +258,7 @@ class LLMResponse:
 
 @dataclass
 class ToolCall:
-    """Representación de una invocación de skill por parte del LLM."""
+    """Representación de una invocación de tool por parte del LLM."""
     name: str
     args: dict[str, Any]
     result: Any = None
@@ -233,14 +267,14 @@ class ToolCall:
 
 
 # ---------------------------------------------------------------------------
-# Skills (Fase 2)
+# Tools (Fase 2)
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SkillDefinition:
+class ToolDefinition:
     """
-    Definición de una skill cargada desde disco.
-    Cada skill vive en skills/<nombre>/ con un meta.md y un run.py.
+    Definición de una tool cargada desde disco.
+    Cada tool vive en tools/<nombre>/ con un meta.md y un run.py.
     """
     name: str                          # Identificador único, ej: "calculator"
     description: str                   # Lo que el LLM ve en el system prompt
@@ -265,9 +299,9 @@ class SkillDefinition:
 @dataclass
 class ToolResult:
     """
-    Resultado de la ejecución de una skill por parte del ShellBridge.
+    Resultado de la ejecución de una tool por parte del ShellBridge.
     """
-    skill_name: str
+    tool_name: str
     output: str                        # stdout del proceso
     exit_code: int = 0
     error: str = ""                   # stderr del proceso
@@ -279,7 +313,7 @@ class ToolResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "skill": self.skill_name,
+            "tool": self.tool_name,
             "output": self.output,
             "exit_code": self.exit_code,
             "error": self.error,

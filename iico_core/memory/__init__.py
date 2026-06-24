@@ -1,4 +1,4 @@
 from .passive import PassiveMemory
-from .active import SkillRegistry
+from .active import ToolRegistry
 
-__all__ = ["PassiveMemory", "SkillRegistry"]
+__all__ = ["PassiveMemory", "ToolRegistry"]

@@ -27,8 +27,9 @@ from typing import AsyncGenerator
 from .bridge.shell import ShellBridge
 from .index.splay_tree import SplayCacheMetrics, SplayTree
 from .llm_client import LLMClient, create_client
-from .memory.active import SkillRegistry
+from .memory.active import ToolRegistry
 from .memory.passive import PassiveMemory
+from .memory.skills import SkillLibrary
 from .types import (
     AgentState,
     ChatMessage,
@@ -37,7 +38,7 @@ from .types import (
     HarnessEventType,
     ProviderConfig,
     SDDDocument,
-    SkillDefinition,
+    ToolDefinition,
     ToolResult,
 )
 
@@ -46,7 +47,7 @@ class Harness:
     """
     Orquestador principal del iico-agent.
 
-    Fase 2: Gestiona memoria dual, Skills y ShellBridge.
+    Fase 2: Gestiona memoria dual, Tools y ShellBridge.
     Fase 3: Máquina de estados que orquesta el flujo SDD completo.
     """
 
@@ -59,6 +60,7 @@ class Harness:
             endpoint=config.provider.endpoint,
             model=config.provider.model,
             temperature=config.provider.temperature,
+            api_key=config.provider.api_key,
         )
 
         # --- Memoria Pasiva (Nivel 1 fuente de verdad en Fase 1) ---
@@ -76,7 +78,7 @@ class Harness:
 
         # --- EmbeddingIndex: Nivel 1 semántico (opcional, requiere ONNX) ---
         self._embedding_index = None
-        if config.use_embedding_search:
+        if config.use_embedding_search or config.use_chunking:
             self._init_embedding_index()
 
         # --- Fase 3: Máquina de Estados SDD ---
@@ -86,13 +88,19 @@ class Harness:
         self._task_manager = None
         self._react_loop = None
 
-        # --- Skills (Fase 2) ---
-        self._skill_registry: SkillRegistry | None = None
-        self._bridge: ShellBridge | None = None
+        # --- Skills de flujo de trabajo (global + local por proyecto) ---
+        self._skill_library: SkillLibrary | None = None
         if config.use_skills:
-            self._skill_registry = SkillRegistry(config.skills_path)
+            self._skill_library = SkillLibrary(config.skills_path)
+            self._skills_local_path: Path | None = None
+
+        # --- Tools (Fase 2) ---
+        self._tool_registry: ToolRegistry | None = None
+        self._bridge: ShellBridge | None = None
+        if config.use_tools:
+            self._tool_registry = ToolRegistry(config.tools_path)
             self._bridge = ShellBridge(
-                default_timeout=config.skill_timeout,
+                default_timeout=config.tool_timeout,
                 project_root=self._project_root,
             )
 
@@ -154,15 +162,38 @@ class Harness:
     # ------------------------------------------------------------------
 
     def _init_embedding_index(self) -> None:
-        """Inicializa y construye el índice semántico con las notas actuales."""
+        """Inicializa y construye el índice semántico con las notas/chunks actuales."""
         try:
             from .index.embedding import EmbeddingIndex
             self._embedding_index = EmbeddingIndex()
-            notes = list(self.passive_memory)
-            if notes:
-                print(f"[Harness] Construyendo índice semántico ({len(notes)} notas)...")
-                self._embedding_index.build_index(notes)
-                print("[Harness] Índice semántico listo.")
+
+            if self.config.use_chunking and self.passive_memory._chunks:
+                # Try loading from disk first (fast path)
+                chunks = list(self.passive_memory._chunks.values())
+                loaded = self._embedding_index.load_from_disk(chunks)
+                if not loaded:
+                    # Build embeddings for chunks that don't have them yet
+                    unembedded = [
+                        c for c in chunks
+                        if c.embedding_path is None or not c.embedding_path.exists()
+                    ]
+                    if unembedded:
+                        print(
+                            f"[Harness] Vectorizando {len(unembedded)} chunks "
+                            f"sin embedding en disco..."
+                        )
+                        self._embedding_index.build_from_chunks(unembedded)
+                print("[Harness] Índice semántico (chunks) listo.")
+            else:
+                # Legacy path: build from notes
+                notes = list(self.passive_memory)
+                if notes:
+                    import warnings
+                    print(f"[Harness] Construyendo índice semántico ({len(notes)} notas)...")
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", DeprecationWarning)
+                        self._embedding_index.build_index(notes)
+                    print("[Harness] Índice semántico listo.")
         except ImportError as e:
             print(f"[Harness] Advertencia: búsqueda semántica desactivada. {e}")
             self._embedding_index = None
@@ -249,23 +280,6 @@ class Harness:
             return
 
         # ─────────────────────────────────────────────────────────────
-        # Detección de intención SDD (estado IDLE)
-        # ─────────────────────────────────────────────────────────────
-
-        sdd_trigger = self._sdd_manager.should_trigger(text) if self._sdd_manager else False
-        print(f"[Harness DEBUG] SDD should_trigger={sdd_trigger}, text_len={len(text)}, use_react_loop={self.config.use_react_loop}")
-        if (
-            self.config.use_react_loop
-            and self._sdd_manager
-            and sdd_trigger
-        ):
-            self._state = AgentState.INTERVIEWING
-            self.history.append(ChatMessage(role="user", content=text))
-            async for event in self._sdd_manager.start_interview(text):
-                yield event
-            return
-
-        # ─────────────────────────────────────────────────────────────
         # ReAct directo (Fase 3, sin plan SDD)
         # ─────────────────────────────────────────────────────────────
 
@@ -311,29 +325,32 @@ class Harness:
         3. Si embeddings no disponibles → fallback a búsqueda por tags
         4. Insertar resultados nuevos en el Splay Tree
         5. Aplicar token budget y formatear
+
+        Los items en el flujo son Chunks (cuando use_chunking=True) o
+        PassiveNote (legado). Ambos comparten id, tags, priority y token_estimate().
         """
         parts = [self.config.system_prompt_base]
 
         if not query or not self.config.use_passive_memory:
-            if self.config.use_skills and self._skill_registry:
-                skills_text = self._skill_registry.format_for_prompt()
-                if skills_text:
-                    parts.append(skills_text)
+            if self.config.use_tools and self._tool_registry:
+                tools_text = self._tool_registry.format_for_prompt()
+                if tools_text:
+                    parts.append(tools_text)
             return "\n\n".join(parts)
 
         # --- Paso 1: Consultar Splay Tree (Nivel 2) ---
-        relevant_notes = []
+        relevant_items = []
         # peek_top retorna nodos sin modificar el árbol
         top_nodes = self._splay.peek_top(n=self.config.splay_peek_top)
         # Extraer los valores directamente de los nodos (sin llamar search() que splayea)
-        cached_notes = [node.value for node in top_nodes]
+        cached_items = [node.value for node in top_nodes]
 
-        if cached_notes and self._splay_is_relevant(cached_notes, query):
+        if cached_items and self._splay_is_relevant(cached_items, query):
             # Hit: el Splay resuelve sin vectorizar
             # Ahora sí llamamos search() para registrar el hit y splayear el nodo correcto
             best_key = top_nodes[0].key
             self._splay.search(best_key)  # registra hit en métricas
-            relevant_notes = cached_notes
+            relevant_items = cached_items
         else:
             # Miss: registrar en métricas
             if top_nodes:
@@ -341,48 +358,56 @@ class Harness:
 
             # --- Paso 2: Fallback al Nivel 1 ---
             if self._embedding_index is not None and self.config.use_embedding_search:
-                # Búsqueda semántica por embeddings
+                # Búsqueda semántica por embeddings (retorna Chunks)
                 results = self._embedding_index.search(
                     query,
                     threshold=self.config.embedding_threshold,
                     top_k=self.config.max_context_notes,
                 )
-                relevant_notes = [note for note, _ in results]
+                relevant_items = [chunk for chunk, _ in results]
+            elif self._embedding_index is not None and self.config.use_chunking:
+                # Chunk path sin embedding search activo: usar solo load_from_disk
+                results = self._embedding_index.search(
+                    query,
+                    threshold=self.config.embedding_threshold,
+                    top_k=self.config.max_context_notes,
+                )
+                relevant_items = [chunk for chunk, _ in results]
             else:
-                # Fallback por tags (Fase 1 behavior)
-                relevant_notes = self.passive_memory.get_relevant(
+                # Fallback por tags (Fase 1 — ahora retorna Chunks)
+                relevant_items = self.passive_memory.get_relevant(
                     query,
                     method="tags",
                     max_results=self.config.max_context_notes,
                 )
 
             # --- Paso 3: Insertar resultados en el Splay Tree ---
-            for note in relevant_notes:
-                self._splay.insert(note.id, note)
+            for item in relevant_items:
+                self._splay.insert(item.id, item)
 
         # --- Paso 4: Aplicar token budget ---
-        if relevant_notes:
+        if relevant_items:
             budgeted = self.passive_memory.apply_token_budget(
-                relevant_notes,
+                relevant_items,
                 max_tokens=self.config.token_budget // 2,
             )
             context_text = self.passive_memory.format_for_prompt(budgeted)
             if context_text:
                 parts.append(context_text)
 
-        # --- Paso 5: Inyectar descripción de skills disponibles ---
-        if self.config.use_skills and self._skill_registry:
-            skills_text = self._skill_registry.format_for_prompt()
-            if skills_text:
-                parts.append(skills_text)
+        # --- Paso 5: Inyectar descripción de tools disponibles ---
+        if self.config.use_tools and self._tool_registry:
+            tools_text = self._tool_registry.format_for_prompt()
+            if tools_text:
+                parts.append(tools_text)
 
         return "\n\n".join(parts)
 
-    def _splay_is_relevant(self, cached_notes: list, query: str) -> bool:
+    def _splay_is_relevant(self, cached_items: list, query: str) -> bool:
         """
-        Heurística para decidir si los nodos cacheados son relevantes para el query.
-        Compara palabras del query con los tags de las notas en caché.
-        Si ninguna nota tiene tags que coincidan, hay divergencia semántica → miss.
+        Heurística para decidir si los items cacheados son relevantes para el query.
+        Compara palabras del query con los tags de los items (Chunks o PassiveNote).
+        Si ningún item tiene tags que coincidan, hay divergencia semántica → miss.
         """
         import re, unicodedata
 
@@ -392,34 +417,34 @@ class Harness:
 
         query_words = set(re.findall(r"\b\w{3,}\b", normalize(query)))
         if not query_words:
-            return bool(cached_notes)  # Sin palabras clave: asumir relevante
+            return bool(cached_items)  # Sin palabras clave: asumir relevante
 
-        for note in cached_notes:
-            tag_set = {normalize(t) for t in getattr(note, "tags", [])}
+        for item in cached_items:
+            tag_set = {normalize(t) for t in getattr(item, "tags", [])}
             if query_words & tag_set:
                 return True
         return False
 
     # ------------------------------------------------------------------
-    # Ejecución de skills (para Fase 3 ReAct, ya disponible desde Fase 2)
+    # Ejecución de tools (para Fase 3 ReAct, ya disponible desde Fase 2)
     # ------------------------------------------------------------------
 
-    def execute_skill(self, skill_name: str, args: dict) -> ToolResult | None:
+    def execute_tool(self, tool_name: str, args: dict) -> ToolResult | None:
         """
-        Ejecuta una skill por nombre via ShellBridge.
-        Retorna None si las skills no están habilitadas o la skill no existe.
+        Ejecuta una tool por nombre via ShellBridge.
+        Retorna None si las tools no están habilitadas o la tool no existe.
         """
-        if self._bridge is None or self._skill_registry is None:
+        if self._bridge is None or self._tool_registry is None:
             return None
-        skill = self._skill_registry.get(skill_name)
-        if skill is None:
+        tool = self._tool_registry.get(tool_name)
+        if tool is None:
             return ToolResult(
-                skill_name=skill_name,
+                tool_name=tool_name,
                 output="",
                 exit_code=1,
-                error=f"Skill '{skill_name}' no encontrada en el registry.",
+                error=f"Tool '{tool_name}' no encontrada en el registry.",
             )
-        return self._bridge.execute(skill, args)
+        return self._bridge.execute(tool, args)
 
     # ------------------------------------------------------------------
     # Recarga de memoria
@@ -429,8 +454,24 @@ class Harness:
         """Recarga las notas desde disco y reconstruye el índice semántico."""
         self.passive_memory.reload()
         if self._embedding_index is not None:
-            notes = list(self.passive_memory)
-            self._embedding_index.build_index(notes)
+            if self.config.use_chunking and self.passive_memory._chunks:
+                # Chunk path: load from disk or build from chunks
+                chunks = list(self.passive_memory._chunks.values())
+                loaded = self._embedding_index.load_from_disk(chunks)
+                if not loaded:
+                    unembedded = [
+                        c for c in chunks
+                        if c.embedding_path is None or not c.embedding_path.exists()
+                    ]
+                    if unembedded:
+                        self._embedding_index.build_from_chunks(unembedded)
+            else:
+                # Legacy path: build from notes
+                notes = list(self.passive_memory)
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", DeprecationWarning)
+                    self._embedding_index.build_index(notes)
         # Limpiar el Splay Tree para evitar datos obsoletos
         self._splay = SplayTree(
             max_nodes=self.config.splay_cache_size,
@@ -566,48 +607,91 @@ class Harness:
             )
 
         elif cmd == "/memory":
-            count = len(self.passive_memory)
+            note_count = len(self.passive_memory._notes)
+            chunk_count = len(self.passive_memory._chunks)
             splay_summary = self._splay_metrics.summary()
-            if count == 0:
+            if note_count == 0 and chunk_count == 0:
                 msg = "La memoria pasiva está vacía. Agrega archivos .md a memory_store/."
             else:
-                ids = ", ".join(n.id for n in self.passive_memory)
-                msg = (
-                    f"Memoria pasiva: {count} nota(s) cargada(s).\n"
-                    f"Notas: {ids}\n"
+                note_ids = ", ".join(n.id for n in self.passive_memory._notes.values())
+                lines = [
+                    f"Memoria pasiva: {note_count} nota(s) cargada(s), {chunk_count} chunk(s).",
+                ]
+                if note_count > 0:
+                    lines.append(f"Notas: {note_ids}")
+                if chunk_count > 0:
+                    # Show chunks grouped by parent note
+                    chunks_by_note: dict[str, list[str]] = {}
+                    for c in self.passive_memory._chunks.values():
+                        chunks_by_note.setdefault(c.parent_note_id, []).append(c.title)
+                    lines.append("Chunks por nota:")
+                    for pid, titles in sorted(chunks_by_note.items()):
+                        lines.append(f"  {pid}: {', '.join(titles)}")
+                lines.append(
                     f"Splay Cache — hits: {splay_summary['hits']} | "
                     f"misses: {splay_summary['misses']} | "
                     f"hit rate: {splay_summary['hit_rate']:.1%} | "
                     f"profundidad media: {splay_summary['avg_depth']:.1f}"
                 )
+                msg = "\n".join(lines)
             yield HarnessEvent(type=HarnessEventType.SYSTEM, payload=msg)
 
         elif cmd == "/memory-reload":
             self.reload_memory()
-            yield HarnessEvent(
-                type=HarnessEventType.SYSTEM,
-                payload=f"Memoria recargada: {len(self.passive_memory)} nota(s). Splay Tree limpiado.",
-            )
+            note_count = len(self.passive_memory._notes)
+            chunk_count = len(self.passive_memory._chunks)
+            if self.config.use_chunking:
+                msg = (
+                    f"Memoria recargada: {note_count} nota(s), {chunk_count} chunk(s). "
+                    f"Splay Tree limpiado."
+                )
+            else:
+                msg = (
+                    f"Memoria recargada: {note_count} nota(s). Splay Tree limpiado."
+                )
+            yield HarnessEvent(type=HarnessEventType.SYSTEM, payload=msg)
+
+        elif cmd == "/tools":
+            if self._tool_registry is None:
+                yield HarnessEvent(
+                    type=HarnessEventType.SYSTEM,
+                    payload="Tools desactivadas. Activa 'use_tools=True' en HarnessConfig.",
+                )
+            else:
+                count = len(self._tool_registry)
+                if count == 0:
+                    msg = "No hay tools registradas en tools/_registry.yaml."
+                else:
+                    names = ", ".join(t.name for t in self._tool_registry)
+                    msg = f"Tools disponibles ({count}): {names}"
+                yield HarnessEvent(type=HarnessEventType.SYSTEM, payload=msg)
 
         elif cmd == "/skills":
-            if self._skill_registry is None:
+            if self._skill_library is None:
                 yield HarnessEvent(
                     type=HarnessEventType.SYSTEM,
                     payload="Skills desactivadas. Activa 'use_skills=True' en HarnessConfig.",
                 )
             else:
-                count = len(self._skill_registry)
+                count = len(self._skill_library)
                 if count == 0:
-                    msg = "No hay skills registradas en skills/_registry.yaml."
+                    msg = "No hay skills de flujo de trabajo en skills/."
                 else:
-                    names = ", ".join(s.name for s in self._skill_registry)
-                    msg = f"Skills disponibles ({count}): {names}"
+                    lines = [f"━━━ Skills de flujo de trabajo ({count}) ━━━\n"]
+                    for sk in self._skill_library:
+                        origin = self._skill_library.origin(sk.name)
+                        tag = f" [{origin}]" if origin else ""
+                        lines.append(f"  /{sk.name}{tag}")
+                        lines.append(f"      {sk.description}")
+                    lines.append("\nEscribe /<nombre> para activar una skill en el contexto.")
+                    msg = "\n".join(lines)
                 yield HarnessEvent(type=HarnessEventType.SYSTEM, payload=msg)
 
         elif cmd == "/splay":
             summary = self._splay_metrics.summary()
+            item_type = "chunks" if self.config.use_chunking else "items"
             msg = (
-                f"Splay Tree — tamaño: {self._splay.size}/{self.config.splay_cache_size} nodos\n"
+                f"Splay Tree — {self._splay.size}/{self.config.splay_cache_size} {item_type}\n"
                 f"Hits: {summary['hits']} | Misses: {summary['misses']}\n"
                 f"Hit rate: {summary['hit_rate']:.1%}\n"
                 f"Profundidad promedio: {summary['avg_depth']:.2f} nodos"
@@ -687,6 +771,11 @@ class Harness:
                         self._task_manager.set_project_root(project_path)
                     if self._bridge:
                         self._bridge.project_root = project_path
+                    if self._skill_library:
+                        local_skills = project_path / ".iico" / "skills"
+                        local_skills.mkdir(parents=True, exist_ok=True)
+                        self._skill_library.add_path(local_skills, label=".iico/skills")
+                        self._skills_local_path = local_skills
                     yield HarnessEvent(
                         type=HarnessEventType.SYSTEM,
                         payload=f"Carpeta raíz del proyecto: {project_path}",
@@ -716,11 +805,35 @@ class Harness:
             )
 
         else:
+            # Intentar resolver como skill y ejecutarla como prompt
+            skill_name = cmd.lstrip("/")
+            if self._skill_library and skill_name in self._skill_library:
+                skill = self._skill_library.get(skill_name)
+                prompt = f"{skill.description}\n\n{skill.content}"
+                self.history.append(ChatMessage(role="user", content=prompt))
+                if self.config.use_react_loop and self._react_loop:
+                    async for event in self._react_loop.execute_simple(prompt):
+                        yield event
+                else:
+                    system_prompt = self.build_system_prompt(query=prompt)
+                    full_response = ""
+                    try:
+                        async for token in self.llm.chat_stream(self.history, system_prompt):
+                            full_response += token
+                            yield HarnessEvent(type=HarnessEventType.TOKEN, payload=token)
+                    except Exception as e:
+                        yield HarnessEvent(type=HarnessEventType.ERROR, payload=str(e))
+                        self.history.pop()
+                        return
+                    self.history.append(ChatMessage(role="assistant", content=full_response))
+                    yield HarnessEvent(type=HarnessEventType.DONE, payload=full_response)
+                return
+
             yield HarnessEvent(
                 type=HarnessEventType.SYSTEM,
                 payload=(
                     f"Comando desconocido '{cmd}'.\n"
-                    "Comandos disponibles: /clear, /memory, /memory-reload, /skills, "
+                    "Comandos disponibles: /clear, /memory, /memory-reload, /tools, /skills, "
                     "/splay, /sdd, /plan, /tasks, /project, /abort"
                 ),
             )
@@ -737,6 +850,7 @@ class Harness:
             endpoint=provider.endpoint,
             model=provider.model,
             temperature=provider.temperature,
+            api_key=provider.api_key,
         )
 
     async def fetch_models(self) -> list[str]:
@@ -756,5 +870,5 @@ class Harness:
         return self._splay_metrics
 
     @property
-    def skill_registry(self) -> SkillRegistry | None:
-        return self._skill_registry
+    def tool_registry(self) -> ToolRegistry | None:
+        return self._tool_registry

@@ -9,7 +9,7 @@ def empty_harness():
     cfg = HarnessConfig(
         provider=ProviderConfig(type="openai", endpoint="http://localhost:11434/v1", model="test"),
         memory_path=Path("dummy_memory"),
-        skills_path=Path("dummy_skills")
+        tools_path=Path("dummy_tools")
     )
     return Harness(cfg)
 

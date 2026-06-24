@@ -10,11 +10,11 @@ Flujo por iteración:
     4. Si no hay tool_calls → el LLM considera la tarea terminada
 
 Auto-corrección integrada:
-    Si una skill falla (exit_code != 0), se inyecta el error al LLM con un
+    Si una tool falla (exit_code != 0), se inyecta el error al LLM con un
     prompt de reflexión y se continúa el bucle (hasta MAX_RETRIES por paso).
 
 Verificación de metas:
-    Al finalizar cada TaskTemplate, se ejecutan los verification_skill de
+    Al finalizar cada TaskTemplate, se ejecutan los verification_tool de
     cada TaskGoal para confirmar que los criterios de aceptación se cumplieron.
 """
 
@@ -39,14 +39,13 @@ if TYPE_CHECKING:
 
 class ReActLoop:
     """
-    Bucle ReAct que ejecuta tareas usando las skills del SkillRegistry.
+    Bucle ReAct que ejecuta tareas usando las tools del ToolRegistry.
 
     Puede operar en dos modos:
     - execute_simple(): tarea conversacional directa (sin plan SDD)
     - execute_task(): tarea formal con metas comprobables y dependencias
     """
 
-    MAX_ITERATIONS_PER_TASK = 12
     MAX_RETRIES_PER_STEP = 3
 
     def __init__(self, harness: "Harness"):
@@ -63,8 +62,8 @@ class ReActLoop:
         """Ejecuta una tarea directa sin plan SDD usando el bucle ReAct."""
         system_prompt = self.harness.build_system_prompt(query=user_text)
         tools = []
-        if self.harness._skill_registry:
-            tools = self.harness._skill_registry.get_tool_descriptions()
+        if self.harness._tool_registry:
+            tools = self.harness._tool_registry.get_tool_descriptions()
             if tools:
                 system_prompt += (
                     "\n\n## REGLAS OBLIGATORIAS DE TOOL CALLING\n"
@@ -79,14 +78,16 @@ class ReActLoop:
         messages: list[ChatMessage] = list(self.harness.history)
         retry_count = 0
 
-        for step in range(self.MAX_ITERATIONS_PER_TASK):
+        iteration = 0
+        while True:
+            iteration += 1
             yield HarnessEvent(
                 type=HarnessEventType.THINKING,
-                payload=f"Razonando (paso {step + 1})...",
+                payload=f"Razonando (paso {iteration})...",
             )
 
             # DEBUG: Log para diagnóstico
-            print(f"[ReAct DEBUG] Paso {step+1}: tools={len(tools)}, "
+            print(f"[ReAct DEBUG] Paso {iteration}: tools={len(tools)}, "
                   f"msgs={len(messages)}, sys_prompt_len={len(system_prompt)}")
             if tools:
                 print(f"[ReAct DEBUG] Tools: {[t.get('function',{}).get('name','?') for t in tools[:5]]}")
@@ -125,14 +126,18 @@ class ReActLoop:
                 yield HarnessEvent(type=HarnessEventType.DONE, payload=response.content)
                 return
 
-            # Con tool_calls → ejecutar skills
-            messages.append(ChatMessage(role="assistant", content=response.content or ""))
+            # Con tool_calls → ejecutar tools
+            messages.append(ChatMessage(
+                role="assistant",
+                content=response.content or "",
+                tool_calls=response.tool_calls,
+            ))
 
             user_cancelled = False
             for tc in response.tool_calls:
-                # Mostrar qué skill/comando se va a ejecutar (con detalle de args)
+                # Mostrar qué tool/comando se va a ejecutar (con detalle de args)
                 yield HarnessEvent(
-                    type=HarnessEventType.SKILL_START,
+                    type=HarnessEventType.TOOL_START,
                     payload={"name": tc.name, "args": tc.args},
                 )
 
@@ -154,8 +159,8 @@ class ReActLoop:
                             content=json.dumps({"error": "Comando cancelado por el usuario. No intentes re-ejecutar este comando ni ninguno similar."}),
                         ))
                         yield HarnessEvent(
-                            type=HarnessEventType.SKILL_DONE,
-                            payload={"skill": tc.name, "success": False, "cancelled": True},
+                            type=HarnessEventType.TOOL_DONE,
+                            payload={"tool": tc.name, "success": False, "cancelled": True},
                         )
                         user_cancelled = True
                         break  # sale del for tc (no del for step)
@@ -167,12 +172,12 @@ class ReActLoop:
                 if not ok and retry_count >= self.MAX_RETRIES_PER_STEP:
                     yield HarnessEvent(
                         type=HarnessEventType.ERROR,
-                        payload=f"La skill '{tc.name}' falló {self.MAX_RETRIES_PER_STEP} veces seguidas.",
+                        payload=f"La tool '{tc.name}' falló {self.MAX_RETRIES_PER_STEP} veces seguidas.",
                     )
                     return
                 yield HarnessEvent(
-                    type=HarnessEventType.SKILL_DONE,
-                    payload={"skill": tc.name, "success": ok},
+                    type=HarnessEventType.TOOL_DONE,
+                    payload={"tool": tc.name, "success": ok},
                 )
 
             # Si el usuario canceló, hacer una sola llamada final sin tools
@@ -203,12 +208,6 @@ class ReActLoop:
                 yield HarnessEvent(type=HarnessEventType.DONE, payload="")
                 return
 
-        # Límite de iteraciones alcanzado
-        yield HarnessEvent(
-            type=HarnessEventType.SYSTEM,
-            payload=f"[ReAct] Límite de {self.MAX_ITERATIONS_PER_TASK} pasos alcanzado.",
-        )
-
     # ------------------------------------------------------------------
     # Modo tarea: ejecución formal con TaskTemplate
     # ------------------------------------------------------------------
@@ -228,18 +227,20 @@ class ReActLoop:
         # Construir prompt específico para esta tarea
         system_prompt = self._build_task_prompt(task, sdd_context_tags or [])
         tools = []
-        if self.harness._skill_registry:
-            tools = self.harness._skill_registry.get_tool_descriptions()
+        if self.harness._tool_registry:
+            tools = self.harness._tool_registry.get_tool_descriptions()
 
         messages: list[ChatMessage] = [
             ChatMessage(role="user", content=task.description)
         ]
         retry_count = 0
 
-        for step in range(self.MAX_ITERATIONS_PER_TASK):
+        iteration = 0
+        while True:
+            iteration += 1
             yield HarnessEvent(
                 type=HarnessEventType.THINKING,
-                payload=f"[{task.id}] Paso {step + 1}/{self.MAX_ITERATIONS_PER_TASK}",
+                payload=f"[{task.id}] Paso {iteration}",
             )
 
             response = await self.harness.llm.chat_with_tools(
@@ -275,9 +276,9 @@ class ReActLoop:
 
             all_ok = True
             for tc in response.tool_calls:
-                # Mostrar qué skill/comando se va a ejecutar
+                # Mostrar qué tool/comando se va a ejecutar
                 yield HarnessEvent(
-                    type=HarnessEventType.SKILL_START,
+                    type=HarnessEventType.TOOL_START,
                     payload={"name": tc.name, "args": tc.args},
                 )
 
@@ -299,8 +300,8 @@ class ReActLoop:
                             content=json.dumps({"error": "Comando cancelado por el usuario. No intentes re-ejecutarlo."}),
                         ))
                         yield HarnessEvent(
-                            type=HarnessEventType.SKILL_DONE,
-                            payload={"skill": tc.name, "success": False, "cancelled": True},
+                            type=HarnessEventType.TOOL_DONE,
+                            payload={"tool": tc.name, "success": False, "cancelled": True},
                         )
                         # En modo tarea, terminar la tarea como fallida y salir
                         task.status = TaskStatus.FAILED
@@ -319,7 +320,7 @@ class ReActLoop:
                         type=HarnessEventType.TASK_FAILED,
                         payload={
                             "id": task.id,
-                            "error": f"Skill '{tc.name}' falló {self.MAX_RETRIES_PER_STEP} veces.",
+                            "error": f"Tool '{tc.name}' falló {self.MAX_RETRIES_PER_STEP} veces.",
                         },
                     )
                     return
@@ -327,8 +328,8 @@ class ReActLoop:
                     all_ok = False
 
                 yield HarnessEvent(
-                    type=HarnessEventType.SKILL_DONE,
-                    payload={"skill": tc.name, "success": ok},
+                    type=HarnessEventType.TOOL_DONE,
+                    payload={"tool": tc.name, "success": ok},
                 )
 
         # Verificar metas
@@ -361,9 +362,9 @@ class ReActLoop:
         self, goal: TaskGoal
     ) -> AsyncGenerator[HarnessEvent, None]:
         """Verifica una meta comprobable de una tarea."""
-        if goal.verification_skill:
-            result = self.harness.execute_skill(
-                goal.verification_skill, goal.verification_args
+        if goal.verification_tool:
+            result = self.harness.execute_tool(
+                goal.verification_tool, goal.verification_args
             )
             goal.met = result is not None and result.success
         else:
@@ -388,15 +389,15 @@ class ReActLoop:
         Ejecuta un tool call vía ShellBridge y maneja auto-corrección.
         Retorna (success, retry_count_actualizado).
         """
-        result = self.harness.execute_skill(tc.name, tc.args)
+        result = self.harness.execute_tool(tc.name, tc.args)
 
         if result is None:
             messages.append(ChatMessage(
                 role="tool",
                 content=json.dumps({
-                    "error": f"Skill '{tc.name}' no encontrada en el registry.",
-                    "available": [s.name for s in self.harness._skill_registry]
-                    if self.harness._skill_registry else [],
+                    "error": f"Tool '{tc.name}' no encontrada en el registry.",
+                    "available": [t.name for t in self.harness._tool_registry]
+                    if self.harness._tool_registry else [],
                 }),
                 tool_call_id=tc.call_id
             ))
@@ -419,7 +420,7 @@ class ReActLoop:
                 tool_call_id=tc.call_id
             ))
         
-        # Siempre retornamos True, 0 si la skill se ejecutó, incluso si falló
+        # Siempre retornamos True, 0 si la tool se ejecutó, incluso si falló
         # (p.ej. comando inválido o archivo no encontrado). Esto permite al LLM
         # ver la salida de error del comando y planear su siguiente paso,
         # en lugar de activar la auto-corrección destructiva del framework.
@@ -475,10 +476,10 @@ class ReActLoop:
             "Ejecútalos tú mismo. Cuando hayas terminado, responde con un resumen de lo que hiciste."
         )
 
-        # Skills disponibles
-        if self.harness._skill_registry:
-            skills_text = self.harness._skill_registry.format_for_prompt()
-            if skills_text:
-                context_parts.append(skills_text)
+        # Tools disponibles
+        if self.harness._tool_registry:
+            tools_text = self.harness._tool_registry.format_for_prompt()
+            if tools_text:
+                context_parts.append(tools_text)
 
         return "\n\n".join(context_parts)

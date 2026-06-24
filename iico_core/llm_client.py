@@ -57,10 +57,11 @@ class LLMClient(Protocol):
 class OllamaClient:
     """Provider para Ollama (API /api/chat)."""
 
-    def __init__(self, endpoint: str, model: str, temperature: float = 0.7):
+    def __init__(self, endpoint: str, model: str, temperature: float = 0.7, api_key: str = ""):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.temperature = temperature
+        self._api_key = api_key
         self._chat_url = f"{self.endpoint}/api/chat"
         self._tags_url = f"{self.endpoint}/api/tags"
 
@@ -309,16 +310,25 @@ class OllamaClient:
 # ---------------------------------------------------------------------------
 
 class OpenAIClient:
-    """Provider compatible con la API de OpenAI (/v1/chat/completions)."""
+    """Provider compatible con la API de OpenAI (/v1/chat/completions).
+    Soporta OpenAI, DeepSeek y cualquier API compatible (LM Studio, vLLM, etc.)."""
 
-    def __init__(self, endpoint: str, model: str, temperature: float = 0.7):
+    def __init__(self, endpoint: str, model: str, temperature: float = 0.7, api_key: str = ""):
         self.model = model
         self.temperature = temperature
+        self._api_key = api_key
         base = endpoint.rstrip("/")
         if not base.endswith("/v1"):
             base += "/v1"
         self._chat_url = f"{base}/chat/completions"
         self._models_url = f"{base}/models"
+
+    def _headers(self) -> dict[str, str]:
+        """Headers HTTP incluyendo Authorization si hay API key."""
+        headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
 
     async def chat_stream(
         self,
@@ -336,7 +346,7 @@ class OpenAIClient:
         }
         timeout = httpx.Timeout(120.0, connect=5.0)
 
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
             try:
                 async with client.stream("POST", self._chat_url, json=payload) as response:
                     response.raise_for_status()
@@ -383,9 +393,14 @@ class OpenAIClient:
 
         timeout = httpx.Timeout(120.0, connect=5.0)
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
                 r = await client.post(self._chat_url, json=payload)
-                r.raise_for_status()
+                if r.status_code >= 400:
+                    error_body = r.text[:500]
+                    return LLMResponse(
+                        content=f"[Error HTTP {r.status_code} desde {self._chat_url}]\n{error_body}",
+                        finish_reason="error",
+                    )
                 data = r.json()
 
             choices = data.get("choices", [])
@@ -428,7 +443,7 @@ class OpenAIClient:
 
     async def fetch_models(self) -> list[str]:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with httpx.AsyncClient(timeout=5.0, headers=self._headers()) as client:
                 r = await client.get(self._models_url)
                 if r.status_code == 200:
                     return [m.get("id") for m in r.json().get("data", [])]
@@ -441,13 +456,20 @@ class OpenAIClient:
 # Factory
 # ---------------------------------------------------------------------------
 
-def create_client(provider_type: str, endpoint: str, model: str, temperature: float = 0.7) -> LLMClient:
+def create_client(
+    provider_type: str,
+    endpoint: str,
+    model: str,
+    temperature: float = 0.7,
+    api_key: str = "",
+) -> LLMClient:
     """
     Crea el cliente correcto según el tipo de provider.
     Uso:
         client = create_client("ollama", "http://localhost:11434", "qwen2.5:7b")
         client = create_client("openai", "http://localhost:8080", "local-model")
+        client = create_client("deepseek", "https://api.deepseek.com", "deepseek-chat", api_key="sk-...")
     """
-    if provider_type == "openai":
-        return OpenAIClient(endpoint, model, temperature)
-    return OllamaClient(endpoint, model, temperature)
+    if provider_type in ("openai", "deepseek"):
+        return OpenAIClient(endpoint, model, temperature, api_key=api_key)
+    return OllamaClient(endpoint, model, temperature, api_key=api_key)

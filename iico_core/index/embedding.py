@@ -17,16 +17,25 @@ Formato del modelo:
 
 Descarga automática del modelo desde HuggingFace Hub la primera vez.
 Se cachea en ~/.cache/iico/models/
+
+Persistencia de embeddings (Fase 4):
+    - load_from_disk(): carga embeddings .npy pre-computados sin ONNX
+    - build_from_chunks(): vectoriza solo chunks nuevos/modificados
+    - update_chunk(): re-vectoriza un chunk individual
 """
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from ..types import Chunk
+
 if TYPE_CHECKING:
+    from ..memory.chunk_store import ChunkStore
     from ..memory.passive import PassiveNote
 
 
@@ -108,7 +117,11 @@ class EmbeddingIndex:
     Flujo:
     1. Al iniciar: vectoriza todas las notas y guarda embeddings en RAM
     2. En search(): vectoriza el query y calcula cosine similarity
-    3. Retorna notas que superan el umbral (default 0.75)
+    3. Retorna chunks que superan el umbral (default 0.75)
+
+    Fase 4 — Persistencia en disco:
+        Usar load_from_disk() para cargar embeddings .npy pre-computados
+        (sin ONNX) o build_from_chunks() para vectorizar solo chunks nuevos.
 
     Sinergia con Splay Tree:
     - Los resultados de search() se insertan en el Splay Tree (Nivel 2)
@@ -133,7 +146,7 @@ class EmbeddingIndex:
 
         self._session = None          # onnxruntime.InferenceSession
         self._tokenizer = None        # tokenizers.Tokenizer
-        self._notes: list["PassiveNote"] = []
+        self._notes: list[Chunk] = []
         self._embeddings: np.ndarray | None = None  # shape: (n_notes, 384)
         self._loaded = False
 
@@ -225,18 +238,40 @@ class EmbeddingIndex:
 
     def build_index(self, notes: "list[PassiveNote]") -> None:
         """
+        Deprecated: use build_from_chunks() for chunk-based indexing or
+        load_from_disk() for persistence.
+
         Vectoriza todas las notas y construye el índice en RAM.
         Llamar al inicio de la sesión o al recargar notas.
         """
+        warnings.warn(
+            "build_index() is deprecated. "
+            "Use build_from_chunks() for chunk-based indexing "
+            "or load_from_disk() for persistence.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
         if not notes:
             self._notes = []
             self._embeddings = None
             return
 
         self._ensure_loaded()
-        self._notes = list(notes)
+        self._notes = []
         embeddings = []
-        for note in self._notes:
+        for note in notes:
+            # Convertir PassiveNote a Chunk para almacenamiento interno
+            chunk = Chunk(
+                id=note.id,
+                parent_note_id=note.id,
+                title=note.id,
+                content=note.content,
+                tags=list(note.tags),
+                priority=note.priority,
+                order=0,
+            )
+            self._notes.append(chunk)
             text = f"{note.id} {' '.join(note.tags)} {note.content[:512]}"
             embeddings.append(self.vectorize(text))
         self._embeddings = np.stack(embeddings)  # shape: (n, 384)
@@ -245,25 +280,181 @@ class EmbeddingIndex:
         """
         Agrega o actualiza una nota en el índice sin rebuild completo.
         Útil cuando el LLM crea una nota nueva via PassiveMemory.add_note().
+
+        Deprecated: use update_chunk() for chunk-based updates.
         """
         self._ensure_loaded()
         text = f"{note.id} {' '.join(note.tags)} {note.content[:512]}"
         embedding = self.vectorize(text)
 
+        # Convertir PassiveNote a Chunk para almacenamiento interno
+        chunk = Chunk(
+            id=note.id,
+            parent_note_id=note.id,
+            title=note.id,
+            content=note.content,
+            tags=list(note.tags),
+            priority=note.priority,
+            order=0,
+        )
+
         # Buscar si ya existe
         for i, existing in enumerate(self._notes):
             if existing.id == note.id:
-                self._notes[i] = note
+                self._notes[i] = chunk
                 if self._embeddings is not None:
                     self._embeddings[i] = embedding
                 return
 
         # Nota nueva: agregar
-        self._notes.append(note)
+        self._notes.append(chunk)
         if self._embeddings is None:
             self._embeddings = embedding[np.newaxis, :]
         else:
             self._embeddings = np.vstack([self._embeddings, embedding])
+
+    # ------------------------------------------------------------------
+    # Persistencia en disco (Fase 4)
+    # ------------------------------------------------------------------
+
+    def load_from_disk(
+        self, chunks: list[Chunk], chunk_store: "ChunkStore | None" = None,
+    ) -> bool:
+        """Carga embeddings pre-computados desde archivos .npy en disco.
+
+        Recorre la lista de chunks: para cada uno, intenta cargar su
+        embedding .npy (via chunk.embedding_path o chunk_store.load_embedding).
+        No llama a ONNX en ningún momento — carga pura de numpy.
+
+        Args:
+            chunks: lista de chunks con sus metadatos.
+            chunk_store: si se provee, usa su load_embedding() (con caché)
+                         en vez de np.load directo.
+
+        Returns:
+            True si al menos un embedding se cargó exitosamente.
+            False si ningún chunk tenía embedding en disco (se necesita
+            build_from_chunks).
+        """
+        self._notes = []
+        embeddings: list[np.ndarray] = []
+        any_loaded = False
+
+        for chunk in chunks:
+            try:
+                if chunk_store is not None:
+                    emb = chunk_store.load_embedding(chunk)
+                else:
+                    if chunk.embedding_path is None or not chunk.embedding_path.exists():
+                        raise FileNotFoundError(
+                            f"No embedding .npy for chunk {chunk.id}"
+                        )
+                    emb = np.load(str(chunk.embedding_path))
+                self._notes.append(chunk)
+                embeddings.append(emb)
+                any_loaded = True
+            except FileNotFoundError:
+                # Chunk sin embedding en disco: se omite silenciosamente
+                continue
+            except ImportError:
+                # numpy no instalado: propagar
+                raise
+
+        if embeddings:
+            self._embeddings = np.stack(embeddings)
+        else:
+            self._embeddings = None
+
+        return any_loaded
+
+    def build_from_chunks(
+        self, chunks: list[Chunk], force: bool = False,
+    ) -> None:
+        """Construye el índice a partir de chunks, vectorizando solo los necesarios.
+
+        Para cada chunk:
+        - Si force=True o chunk no tiene embedding_path → vectoriza con ONNX
+          y guarda el .npy en chunk.embedding_path.
+        - Si force=False y el chunk ya tiene embedding_path → omite.
+
+        Args:
+            chunks: lista de chunks (con o sin embeddings previos).
+            force: si True, re-vectoriza todos los chunks.
+        """
+        if not chunks:
+            self._notes = []
+            self._embeddings = None
+            return
+
+        self._ensure_loaded()
+        self._notes = []
+        embeddings: list[np.ndarray] = []
+
+        for chunk in chunks:
+            # Determinar si necesita vectorización
+            needs_vectorize = force or chunk.embedding_path is None
+            if not needs_vectorize and chunk.embedding_path is not None:
+                needs_vectorize = not chunk.embedding_path.exists()
+
+            if needs_vectorize:
+                text = self._chunk_text(chunk)
+                embedding = self.vectorize(text)
+
+                # Guardar embedding en disco si hay ruta
+                if chunk.embedding_path is not None:
+                    chunk.embedding_path.parent.mkdir(parents=True, exist_ok=True)
+                    np.save(str(chunk.embedding_path), embedding)
+                embeddings.append(embedding)
+            else:
+                # Cargar desde disco (ya existe el .npy)
+                emb = np.load(str(chunk.embedding_path))
+                embeddings.append(emb)
+
+            self._notes.append(chunk)
+
+        if embeddings:
+            self._embeddings = np.stack(embeddings)
+        else:
+            self._embeddings = None
+
+    def update_chunk(self, chunk: Chunk) -> None:
+        """Re-vectoriza un chunk individual y actualiza la fila en el índice.
+
+        - Si el chunk ya existe en self._notes (por id), reemplaza su fila
+          en self._embeddings y sobreescribe el .npy en disco.
+        - Si el chunk no existe en el índice, lo agrega al final.
+
+        Args:
+            chunk: el chunk a actualizar o insertar.
+        """
+        self._ensure_loaded()
+        text = self._chunk_text(chunk)
+        embedding = self.vectorize(text)
+
+        # Guardar en disco si hay ruta
+        if chunk.embedding_path is not None:
+            chunk.embedding_path.parent.mkdir(parents=True, exist_ok=True)
+            np.save(str(chunk.embedding_path), embedding)
+
+        # Buscar si ya existe por id
+        for i, existing in enumerate(self._notes):
+            if existing.id == chunk.id:
+                self._notes[i] = chunk
+                if self._embeddings is not None:
+                    self._embeddings[i] = embedding
+                return
+
+        # Chunk nuevo: agregar al final
+        self._notes.append(chunk)
+        if self._embeddings is None:
+            self._embeddings = embedding[np.newaxis, :]
+        else:
+            self._embeddings = np.vstack([self._embeddings, embedding])
+
+    @staticmethod
+    def _chunk_text(chunk: Chunk) -> str:
+        """Construye el texto a vectorizar para un chunk."""
+        return f"{chunk.id} {' '.join(chunk.tags)} {chunk.content[:512]}"
 
     # ------------------------------------------------------------------
     # Búsqueda semántica
@@ -274,9 +465,9 @@ class EmbeddingIndex:
         query: str,
         threshold: float = 0.75,
         top_k: int = 5,
-    ) -> "list[tuple[PassiveNote, float]]":
+    ) -> "list[tuple[Chunk, float]]":
         """
-        Busca notas semánticamente similares al query.
+        Busca chunks semánticamente similares al query.
 
         Args:
             query: texto a buscar (se vectoriza internamente)
@@ -284,8 +475,8 @@ class EmbeddingIndex:
             top_k: número máximo de resultados
 
         Returns:
-            Lista de (nota, score) ordenada por score descendente,
-            solo incluyendo notas con score >= threshold.
+            Lista de (chunk, score) ordenada por score descendente,
+            solo incluyendo chunks con score >= threshold.
         """
         if not self._notes or self._embeddings is None:
             return []
@@ -297,7 +488,7 @@ class EmbeddingIndex:
         scores = self._embeddings @ query_embedding  # shape: (n,)
 
         # Filtrar por umbral y ordenar
-        results: list[tuple["PassiveNote", float]] = []
+        results: list[tuple[Chunk, float]] = []
         for i, score in enumerate(scores):
             if score >= threshold:
                 results.append((self._notes[i], float(score)))
