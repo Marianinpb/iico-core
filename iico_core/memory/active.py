@@ -1,10 +1,10 @@
 """
 iico_core/memory/active.py
 ===========================
-Registro de Skills (Memoria Activa).
+Registro de Tools (Memoria Activa).
 
-Cada skill vive en un directorio propio:
-    skills/
+Cada tool vive en un directorio propio:
+    tools/
     ├── _registry.yaml       ← índice maestro: nombre → path relativo
     └── calculator/
         ├── meta.md          ← YAML frontmatter + descripción para el LLM
@@ -42,22 +42,22 @@ from typing import Iterator
 import frontmatter
 import yaml
 
-from ..types import SkillDefinition
+from ..types import ToolDefinition
 
 
-class SkillRegistry:
+class ToolRegistry:
     """
-    Gestiona el catálogo de skills disponibles para el agente.
+    Gestiona el catálogo de tools disponibles para el agente.
 
     Responsabilidades:
-    - Cargar las definiciones de skills desde disco al iniciar
+    - Cargar las definiciones de tools desde disco al iniciar
     - Proveer las descripciones de tools al Harness (para el system prompt)
-    - Resolver el nombre de una skill a su SkillDefinition (para el Bridge)
+    - Resolver el nombre de una tool a su ToolDefinition (para el Bridge)
     """
 
-    def __init__(self, skills_path: Path | str = "skills"):
-        self.skills_path = Path(skills_path)
-        self._skills: dict[str, SkillDefinition] = {}  # name → definición
+    def __init__(self, tools_path: Path | str = "tools"):
+        self.tools_path = Path(tools_path)
+        self._tools: dict[str, ToolDefinition] = {}  # name → definición
         self.load()
 
     # ------------------------------------------------------------------
@@ -65,53 +65,53 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     def load(self) -> None:
-        """Carga el índice de skills. Soporta dos modos:
-        1. Via _registry.yaml: lista explícita de skills habilitadas
+        """Carga el índice de tools. Soporta dos modos:
+        1. Via _registry.yaml: lista explícita de tools habilitadas
         2. Discovery automático: escanea subdirectorios con meta.md
         """
-        self._skills.clear()
-        if not self.skills_path.exists():
+        self._tools.clear()
+        if not self.tools_path.exists():
             return
 
-        registry_file = self.skills_path / "_registry.yaml"
+        registry_file = self.tools_path / "_registry.yaml"
         if registry_file.exists():
             self._load_from_registry(registry_file)
         else:
-            self._discover_skills()
+            self._discover_tools()
 
     def _load_from_registry(self, registry_file: Path) -> None:
-        """Carga skills listadas en _registry.yaml."""
+        """Carga tools listadas en _registry.yaml."""
         try:
             with open(registry_file, encoding="utf-8") as f:
                 registry = yaml.safe_load(f) or {}
         except Exception as e:
-            print(f"[SkillRegistry] Error al leer _registry.yaml: {e}")
+            print(f"[ToolRegistry] Error al leer _registry.yaml: {e}")
             return
 
-        skills_list = registry.get("skills", [])
-        for entry in skills_list:
+        tools_list = registry.get("tools", [])
+        for entry in tools_list:
             if isinstance(entry, str):
-                skill_dir = self.skills_path / entry
+                tool_dir = self.tools_path / entry
             elif isinstance(entry, dict):
-                skill_dir = self.skills_path / entry.get("path", entry.get("name", ""))
+                tool_dir = self.tools_path / entry.get("path", entry.get("name", ""))
             else:
                 continue
 
-            skill = self._load_skill_dir(skill_dir)
-            if skill:
-                self._skills[skill.name] = skill
+            tool = self._load_tool_dir(tool_dir)
+            if tool:
+                self._tools[tool.name] = tool
 
-    def _discover_skills(self) -> None:
+    def _discover_tools(self) -> None:
         """Escanea subdirectorios buscando meta.md automáticamente."""
-        for skill_dir in self.skills_path.iterdir():
-            if skill_dir.is_dir() and not skill_dir.name.startswith("_"):
-                skill = self._load_skill_dir(skill_dir)
-                if skill:
-                    self._skills[skill.name] = skill
+        for tool_dir in self.tools_path.iterdir():
+            if tool_dir.is_dir() and not tool_dir.name.startswith("_"):
+                tool = self._load_tool_dir(tool_dir)
+                if tool:
+                    self._tools[tool.name] = tool
 
-    def _load_skill_dir(self, skill_dir: Path) -> SkillDefinition | None:
-        """Parsea el meta.md de un directorio de skill."""
-        meta_path = skill_dir / "meta.md"
+    def _load_tool_dir(self, tool_dir: Path) -> ToolDefinition | None:
+        """Parsea el meta.md de un directorio de tool."""
+        meta_path = tool_dir / "meta.md"
         if not meta_path.exists():
             return None
 
@@ -119,7 +119,7 @@ class SkillRegistry:
             post = frontmatter.load(str(meta_path))
             meta = post.metadata
 
-            name = str(meta.get("name", skill_dir.name))
+            name = str(meta.get("name", tool_dir.name))
             description = str(meta.get("description", post.content.strip()[:200]))
             runtime = str(meta.get("runtime", "python"))
             tags_raw = meta.get("tags", [])
@@ -137,16 +137,16 @@ class SkillRegistry:
 
             # Resolver el ejecutable según el runtime
             if runtime == "python":
-                executable = skill_dir / "run.py"
+                executable = tool_dir / "run.py"
             elif runtime == "shell":
-                executable = skill_dir / "run.sh"
+                executable = tool_dir / "run.sh"
             else:
-                executable = skill_dir / "run.py"  # fallback
+                executable = tool_dir / "run.py"  # fallback
 
             if not executable.exists():
-                print(f"[SkillRegistry] Advertencia: {executable} no existe para skill '{name}'")
+                print(f"[ToolRegistry] Advertencia: {executable} no existe para tool '{name}'")
 
-            return SkillDefinition(
+            return ToolDefinition(
                 name=name,
                 description=description,
                 input_schema=input_schema,
@@ -157,7 +157,7 @@ class SkillRegistry:
             )
 
         except Exception as e:
-            print(f"[SkillRegistry] Error al cargar skill en {skill_dir}: {e}")
+            print(f"[ToolRegistry] Error al cargar tool en {tool_dir}: {e}")
             return None
 
     def reload(self) -> None:
@@ -168,39 +168,39 @@ class SkillRegistry:
     # Consultas
     # ------------------------------------------------------------------
 
-    def get(self, skill_name: str) -> SkillDefinition | None:
-        """Devuelve la definición de una skill por nombre."""
-        return self._skills.get(skill_name)
+    def get(self, tool_name: str) -> ToolDefinition | None:
+        """Devuelve la definición de una tool por nombre."""
+        return self._tools.get(tool_name)
 
     def get_tool_descriptions(self) -> list[dict]:
         """
         Genera la lista de descriptores de tools para el system prompt del LLM.
         Formato compatible con OpenAI tool calling / Ollama.
         """
-        return [skill.to_tool_dict() for skill in self._skills.values()]
+        return [tool.to_tool_dict() for tool in self._tools.values()]
 
     def format_for_prompt(self) -> str:
-        """Genera texto legible de las skills disponibles para el system prompt."""
-        if not self._skills:
+        """Genera texto legible de las tools disponibles para el system prompt."""
+        if not self._tools:
             return ""
-        lines = ["## Skills disponibles\n"]
-        for skill in self._skills.values():
-            lines.append(f"- **{skill.name}**: {skill.description}")
+        lines = ["## Tools disponibles\n"]
+        for tool in self._tools.values():
+            lines.append(f"- **{tool.name}**: {tool.description}")
         return "\n".join(lines)
 
-    def search_by_tags(self, query: str, max_results: int = 3) -> list[SkillDefinition]:
-        """Búsqueda de skills por tags (para integración con el Splay Tree)."""
+    def search_by_tags(self, query: str, max_results: int = 3) -> list[ToolDefinition]:
+        """Búsqueda de tools por tags (para integración con el Splay Tree)."""
         normalized_query = self._normalize(query)
         query_words = set(re.findall(r"\b\w{2,}\b", normalized_query))
         if not query_words:
-            return list(self._skills.values())[:max_results]
+            return list(self._tools.values())[:max_results]
 
-        scored: list[tuple[int, SkillDefinition]] = []
-        for skill in self._skills.values():
-            tag_set = set(self._normalize(t) for t in skill.tags)
+        scored: list[tuple[int, ToolDefinition]] = []
+        for tool in self._tools.values():
+            tag_set = set(self._normalize(t) for t in tool.tags)
             matches = len(query_words & tag_set)
             if matches > 0:
-                scored.append((matches, skill))
+                scored.append((matches, tool))
 
         scored.sort(key=lambda x: -x[0])
         return [s for _, s in scored[:max_results]]
@@ -216,14 +216,14 @@ class SkillRegistry:
     # ------------------------------------------------------------------
 
     @property
-    def skills(self) -> dict[str, SkillDefinition]:
-        return self._skills
+    def tools(self) -> dict[str, ToolDefinition]:
+        return self._tools
 
     def __len__(self) -> int:
-        return len(self._skills)
+        return len(self._tools)
 
-    def __iter__(self) -> Iterator[SkillDefinition]:
-        return iter(self._skills.values())
+    def __iter__(self) -> Iterator[ToolDefinition]:
+        return iter(self._tools.values())
 
     def __contains__(self, name: str) -> bool:
-        return name in self._skills
+        return name in self._tools

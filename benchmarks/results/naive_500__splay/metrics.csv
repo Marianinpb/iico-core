@@ -1,0 +1,12 @@
+query_id,query,latency_ms,context_tokens,cache_hit,ragas_score,e_tok,ragas_faithfulness,ragas_answer_relevancy,ragas_from_cache
+q_hw_01,¿Qué consideraciones de interfaz se deben tener al diseñar un periférico VHDL para el procesador?,46.08,566,False,0.1,5145.5,0.0,0.2,True
+q_hw_02,¿Cuál es la mejor estructura para evitar condiciones de carrera al programar un VI?,0.03,566,False,0.0,56600.0,0.0,0.0,True
+q_hw_03,¿Cómo se previene la desincronización al combinar lectura analógica de alta velocidad con puertos seriales?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_ai_01,¿Por qué es necesario dividir por la raíz cuadrada de la dimensión en el cálculo de atención?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_ai_02,¿Cómo soluciona la arquitectura Transformer la imposibilidad de paralelizar en GPUs que tenían los modelos anteriores?,0.02,566,False,0.3,1825.8,0.0,0.6,True
+q_ai_03,¿Qué técnica se utiliza para evitar que el pipeline evalúe dos veces preguntas que significan lo mismo pero están escritas diferente?,0.02,566,False,0.95,589.6,1.0,0.9,True
+q_ai_04,¿Qué debe hacer un agente si se da cuenta de que la información que acaba de buscar en la base de datos no le sirve para responder?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_phys_01,¿Cómo determina el algoritmo de perturbación y observación si debe aumentar o reducir la tensión para encontrar el MPP?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_phys_02,¿Cuál es la implicación física del término de corriente de desplazamiento introducido en la ley de Ampère-Maxwell?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_phys_03,¿Por qué la solución analítica de las Ecuaciones de Wiener-Hopf no es viable en entornos reales no estacionarios?,0.02,566,False,0.0,56600.0,0.0,0.0,True
+q_phys_04,¿Cuál es el compromiso (trade-off) de utilizar un valor muy alto para el tamaño de paso (mu) en el algoritmo LMS?,0.03,566,False,0.0,56600.0,0.0,0.0,True

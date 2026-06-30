@@ -1,0 +1,23 @@
+{
+  "run_id": "naive_500+convolution__splay",
+  "chunking": [
+    "naive",
+    "convolution"
+  ],
+  "retrieval_strategy": "splay",
+  "top_k": 5,
+  "enable_ragas": true,
+  "aggregated": {
+    "num_queries": 11,
+    "avg_latency_ms": 4.71,
+    "avg_context_tokens": 583.0,
+    "avg_ragas_score": 0.1864,
+    "avg_ragas_context_precision": 0.0773,
+    "avg_ragas_context_recall": 0.1455,
+    "avg_e_tok": 42656.33,
+    "ragas_cache_hit_rate": 1.0,
+    "splay_hit_rate": 0.0,
+    "total_elapsed_ms": 8002.1
+  },
+  "errors": []
+}
